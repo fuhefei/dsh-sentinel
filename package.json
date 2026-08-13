@@ -46,8 +46,8 @@
     "tsdown": "^0.22.0",
     "typescript": "^5.5.0",
     "vitest": "^3.0.0",
-    "@deepseek-ai/dsh-llm": "^0.0.1-rc.5",
-    "@deepseek-ai/dsh-tools": "^0.0.1-rc.5"
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6"
   },
   "scripts": {
     "build": "tsc -b && tsdown",
