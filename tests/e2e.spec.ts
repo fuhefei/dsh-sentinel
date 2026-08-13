@@ -186,6 +186,52 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(listed.subscriptions.map(sub => sub.id)).toContain('watch-1')
   })
 
+  it('compacts a history-heavy sidecar at boot without losing fire budget', async () => {
+    await freshHome()
+    const sid = 'session-e2e'
+    const rows: string[] = []
+    const push = (change: unknown): void => {
+      rows.push(JSON.stringify({ v: 1, sessionId: sid, change }))
+    }
+    push({
+      version: 1, change: 'created',
+      subscription: {
+        id: 'watch-9', spec: { kind: 'process', target: 'never-running-proc', intervalSeconds: 30 },
+        note: 'compaction survivor', maxFires: 5, cooldownSeconds: 60, createdAt: '2026-08-13T00:00:00.000Z',
+      },
+    })
+    push({ version: 1, change: 'fired', id: 'watch-9', at: '2026-08-13T01:00:00.000Z', fact: { fireNumber: 1, summary: 's', before: '', after: 'x', probeMs: 1 } })
+    push({ version: 1, change: 'fired', id: 'watch-9', at: '2026-08-13T02:00:00.000Z', fact: { fireNumber: 2, summary: 's', before: '', after: 'x', probeMs: 1 } })
+    for (let index = 0; index < 20; index += 1) {
+      const id = `watch-c${String(index)}`
+      push({
+        version: 1, change: 'created',
+        subscription: {
+          id, spec: { kind: 'process', target: 'gone', intervalSeconds: 30 },
+          note: 'cancelled history', maxFires: 1, cooldownSeconds: 60, createdAt: '2026-08-13T00:00:00.000Z',
+        },
+      })
+      push({ version: 1, change: 'cancelled', id, at: '2026-08-13T03:00:00.000Z', reason: 'agent' })
+    }
+    await writeFile(storePath(), `${rows.join('\n')}\n`)
+
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never)
+    await sleep(400)
+    harness.emit('agent/created', { agent: harness.agent })
+
+    const compacted = await storeLines()
+    // The rewrite lands first; the survivor's first probe may append one baseline row.
+    expect(compacted.length).toBeLessThanOrEqual(2)
+    expect(compacted[0]?.change.change).toBe('compacted')
+    const listTool = harness.tools.find(tool => tool.name === 'sentinel_list')
+    if (listTool === undefined) throw new Error('list tool missing')
+    const listed = await listTool.execute({}, {}) as { subscriptions: Array<{ id: string; fireCount: number }> }
+    expect(listed.subscriptions.map(sub => sub.id)).toContain('watch-9')
+    expect(listed.subscriptions.find(sub => sub.id === 'watch-9')?.fireCount).toBe(2)
+  })
+
   it('watches a dormant session server-side and resumes it to deliver the fire', async () => {
     await freshHome()
     const first = makeHarness()

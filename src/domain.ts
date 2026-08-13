@@ -92,6 +92,27 @@ export type SentinelChange =
     readonly at: string
     readonly reason: 'agent' | 'expired' | 'exhausted'
   }
+  | {
+    readonly version: number
+    /**
+     * Boot-time compaction artifact: one row replacing a session's whole
+     * history, carrying the subscription exactly as folded (fire budget and
+     * last observation included). Old readers reject it as an unknown change.
+     */
+    readonly change: 'compacted'
+    readonly subscription: {
+      readonly id: string
+      readonly spec: SensorSpec
+      readonly note: string
+      readonly maxFires: number
+      readonly cooldownSeconds: number
+      readonly expiresAt?: string
+      readonly createdAt: string
+      readonly fireCount: number
+      readonly lastFiredAt?: string
+      readonly lastKnown?: KnownSnapshot
+    }
+  }
 
 /** The structured trigger fact delivered with a wakeup (and logged). */
 export interface FireFact {
@@ -242,6 +263,53 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     }
     return { version: SENTINEL_CHANGE_VERSION, change: 'cancelled', id, at, reason }
   }
+  if (change === 'compacted') {
+    const sub = value['subscription']
+    if (!isRecord(sub)) throw new SentinelLogError('compacted change must carry a subscription object')
+    const id = sub['id']
+    const note = sub['note']
+    const createdAt = sub['createdAt']
+    if (typeof id !== 'string' || id === '') throw new SentinelLogError('subscription id must be a non-empty string')
+    if (typeof note !== 'string' || note === '') throw new SentinelLogError('subscription note must be a non-empty string')
+    if (typeof createdAt !== 'string') throw new SentinelLogError('subscription createdAt must be a string')
+    const maxFires = sub['maxFires']
+    const cooldown = sub['cooldownSeconds']
+    const fireCount = sub['fireCount']
+    if (typeof maxFires !== 'number' || !Number.isInteger(maxFires) || maxFires < 1) {
+      throw new SentinelLogError('maxFires must be a positive integer')
+    }
+    if (typeof cooldown !== 'number' || !Number.isInteger(cooldown) || cooldown < 0) {
+      throw new SentinelLogError('cooldownSeconds must be a non-negative integer')
+    }
+    if (typeof fireCount !== 'number' || !Number.isInteger(fireCount) || fireCount < 0) {
+      throw new SentinelLogError('compacted fireCount must be a non-negative integer')
+    }
+    const expiresAt = sub['expiresAt']
+    if (expiresAt !== undefined && typeof expiresAt !== 'string') {
+      throw new SentinelLogError('expiresAt must be a string when present')
+    }
+    const lastFiredAt = sub['lastFiredAt']
+    if (lastFiredAt !== undefined && typeof lastFiredAt !== 'string') {
+      throw new SentinelLogError('lastFiredAt must be a string when present')
+    }
+    const lastKnown = sub['lastKnown']
+    return {
+      version: SENTINEL_CHANGE_VERSION,
+      change: 'compacted',
+      subscription: {
+        id,
+        spec: normalizeSpec(sub['spec']),
+        note,
+        maxFires,
+        cooldownSeconds: cooldown,
+        ...(expiresAt !== undefined ? { expiresAt } : {}),
+        createdAt,
+        fireCount,
+        ...(lastFiredAt !== undefined ? { lastFiredAt } : {}),
+        ...(lastKnown !== undefined ? { lastKnown: decodeObserved(lastKnown) } : {}),
+      },
+    }
+  }
   throw new SentinelLogError(`unknown sentinel change: ${String(change)}`)
 }
 
@@ -272,6 +340,13 @@ export function foldSentinelEvents(events: Iterable<SentinelEventRow>): FoldedSe
     if (change.change === 'created') {
       const sub = change.subscription
       active.set(sub.id, { ...sub, fireCount: 0 })
+      const match = /^watch-(\d+)$/.exec(sub.id)
+      if (match !== null) lastOrdinal = Math.max(lastOrdinal, Number(match[1]))
+      continue
+    }
+    if (change.change === 'compacted') {
+      const sub = change.subscription
+      active.set(sub.id, { ...sub })
       const match = /^watch-(\d+)$/.exec(sub.id)
       if (match !== null) lastOrdinal = Math.max(lastOrdinal, Number(match[1]))
       continue

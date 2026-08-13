@@ -7,7 +7,7 @@
  * by session, folded on load — the same event-sourcing discipline, our own
  * file.
  */
-import { appendFile, mkdir, readFile } from 'node:fs/promises'
+import { appendFile, mkdir, rename, readFile, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import {
   decodeSentinelChange,
@@ -76,6 +76,19 @@ export class SentinelStore {
       await appendFile(this.path, line, 'utf8')
     })
     // Keep the chain alive after a failed write; the caller sees the rejection.
+    this.chain = next.catch(() => {})
+    return next
+  }
+
+  /** Atomically rewrite the whole log (boot-time compaction); rides the append chain. */
+  replaceAll(lines: readonly string[]): Promise<void> {
+    const text = lines.map(line => `${line}\n`).join('')
+    const next = this.chain.then(async () => {
+      await mkdir(dirname(this.path), { recursive: true })
+      const tmp = `${this.path}.compacting`
+      await writeFile(tmp, text, 'utf8')
+      await rename(tmp, this.path)
+    })
     this.chain = next.catch(() => {})
     return next
   }

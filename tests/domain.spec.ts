@@ -162,6 +162,47 @@ describe('decodeSentinelChange', () => {
   })
 })
 
+describe('compacted change', () => {
+  function compactedEvent(overrides: Record<string, unknown> = {}) {
+    return {
+      type: SENTINEL_CHANGE_TYPE,
+      payload: {
+        version: SENTINEL_CHANGE_VERSION,
+        change: 'compacted',
+        subscription: {
+          id: 'watch-7',
+          spec: { kind: 'file', target: '/tmp/deploy.lock', pattern: 'RELEASE', intervalSeconds: 15 },
+          note: 'release lock appeared',
+          maxFires: 5,
+          cooldownSeconds: 60,
+          createdAt: '2026-08-13T00:00:00.000Z',
+          fireCount: 2,
+          lastFiredAt: '2026-08-13T06:00:00.000Z',
+          lastKnown: { state: 'exists (12 bytes)', snapshot: 'size=12 mtime=1\nRELEASE' },
+          ...overrides,
+        },
+      },
+    }
+  }
+
+  it('folds back the subscription with fire budget and baseline intact', () => {
+    const folded = foldSentinelEvents([compactedEvent()])
+    const sub = folded.active.get('watch-7')
+    expect(sub?.fireCount).toBe(2)
+    expect(sub?.lastFiredAt).toBe('2026-08-13T06:00:00.000Z')
+    expect(sub?.lastKnown?.state).toBe('exists (12 bytes)')
+    expect(folded.lastOrdinal).toBe(7)
+  })
+
+  it('rejects a negative folded fireCount', () => {
+    expect(() => foldSentinelEvents([compactedEvent({ fireCount: -1 })])).toThrow(SentinelLogError)
+  })
+
+  it('rejects a missing lastKnown shape', () => {
+    expect(() => foldSentinelEvents([compactedEvent({ lastKnown: { state: 'x' } })])).toThrow(SentinelLogError)
+  })
+})
+
 describe('renderWakeup', () => {
   const sub: Subscription = {
     id: 'watch-3',

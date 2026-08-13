@@ -64,4 +64,21 @@ describe('probe', () => {
     expect(result.snapshot).not.toContain('pwned')
     expect(result.state).toBe('no process')
   })
+
+  it('snapshots only the tail of a large file', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sentinel-'))
+    dirs.push(dir)
+    const path = join(dir, 'big.log')
+    // Head region (H) must fall outside the 8192-byte tail window.
+    const head = 'H'.repeat(20_000)
+    const middle = 'X'.repeat(9_000)
+    const tail = 'TAIL-MARKER-end'
+    await writeFile(path, `${head}${middle}${tail}`)
+    const result = await probe({ kind: 'file', target: path, intervalSeconds: 5 })
+    expect(result.snapshot).toContain('TAIL-MARKER-end')
+    expect(result.snapshot).toContain('XXX')
+    expect(result.snapshot).not.toContain('H'.repeat(100))
+    expect(result.snapshot.length).toBeLessThan(9000)
+    expect(result.state).toContain(String(head.length + middle.length + tail.length))
+  })
 })

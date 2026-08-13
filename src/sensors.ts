@@ -8,7 +8,7 @@
  * already had permission to run interactively when it registered the watch.
  */
 import { exec, execFile } from 'node:child_process'
-import { stat, readFile } from 'node:fs/promises'
+import { open, stat } from 'node:fs/promises'
 import type { SensorSpec } from './domain.ts'
 
 export interface ProbeResult {
@@ -21,14 +21,22 @@ export interface ProbeResult {
 const PROBE_TIMEOUT_MS = 10_000
 const SNAPSHOT_TAIL_BYTES = 8192
 
-/** Read the tail of a file plus its identity line; missing file is a state, not an error. */
+/** Read the tail of a file plus its identity line; missing file is a state, not an error. Only the trailing bytes are read, so huge files cost a bounded buffer. */
 async function probeFile(target: string): Promise<ProbeResult> {
   try {
     const info = await stat(target)
     let tail = ''
     if (info.isFile() && info.size > 0) {
-      const buffer = await readFile(target)
-      tail = buffer.subarray(Math.max(0, buffer.length - SNAPSHOT_TAIL_BYTES)).toString('utf8')
+      const length = Math.min(Number(info.size), SNAPSHOT_TAIL_BYTES)
+      const buffer = Buffer.alloc(length)
+      const handle = await open(target, 'r')
+      try {
+        // Positioned at the tail; a concurrent grow shortens the read, never misaligns it.
+        await handle.read(buffer, 0, length, Number(info.size) - length)
+      } finally {
+        await handle.close()
+      }
+      tail = buffer.toString('utf8')
     }
     return {
       snapshot: `size=${String(info.size)} mtime=${info.mtimeMs.toFixed(0)}\n${tail}`,

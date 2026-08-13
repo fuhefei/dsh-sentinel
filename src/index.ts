@@ -55,6 +55,10 @@ export const DASHBOARD_PATH = `/plugins/${PLUGIN_ID}/dashboard`
 const HEARTBEAT_MS = 5000
 const PUSH_DEBOUNCE_MS = 250
 const MAX_PENDING_WAKEUPS = 8
+/** fsWatch arm failures back off this long before retrying (heartbeat polling covers the gap). */
+const FILE_WATCH_RETRY_MS = 60_000
+/** Compact the sidecar at boot when rows exceed active subscriptions by this margin. */
+const COMPACTION_MARGIN = 32
 
 /** Sidecar log location: `$DSH_HOME/sentinel.jsonl` (the settings-file convention). */
 export function storePath(): string {
@@ -121,6 +125,8 @@ class SessionWatch {
   rows: FoldableRow[] = []
   readonly probes = new Map<string, ProbeState>()
   readonly watchers = new Map<string, { watcher: FSWatcher; mode: 'direct' | 'parent' }>()
+  /** Last fsWatch arm failure per subscription; arms back off for FILE_WATCH_RETRY_MS. */
+  readonly watchFailures = new Map<string, number>()
   readonly pushTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly recentFires: FireRecord[] = []
   readonly pendingWakeups: string[] = []
@@ -177,7 +183,9 @@ class SentinelRuntime {
       return
     }
     if (this.disposed) return
+    let totalRows = 0
     for (const [sessionId, rows] of grouped) {
+      totalRows += rows.length
       const watch = this.watchOf(sessionId)
       watch.rows = rows
       this.refold(watch)
@@ -186,7 +194,33 @@ class SentinelRuntime {
         this.watches.delete(sessionId)
       }
     }
+    this.compact(totalRows)
     void this.drive()
+  }
+
+  /**
+   * Rewrite a history-heavy sidecar as one 'compacted' row per active
+   * subscription (fire budget and last observation intact). Fire-and-forget:
+   * later appends ride the store chain, so they land after the rewrite.
+   */
+  private compact(totalRows: number): void {
+    let activeCount = 0
+    for (const watch of this.watches.values()) activeCount += watch.folded.active.size
+    if (totalRows <= activeCount * 4 + COMPACTION_MARGIN) return
+    const lines: string[] = []
+    for (const watch of this.watches.values()) {
+      for (const sub of watch.folded.active.values()) {
+        lines.push(JSON.stringify({
+          v: SENTINEL_CHANGE_VERSION,
+          sessionId: watch.sessionId,
+          change: { version: SENTINEL_CHANGE_VERSION, change: 'compacted', subscription: sub },
+        }))
+      }
+    }
+    void this.store.replaceAll(lines).then(
+      () => { this.warn(`sidecar compacted: ${String(totalRows)} rows -> ${String(lines.length)}`) },
+      (error: unknown) => { this.warn(`sidecar compaction failed (will retry next boot): ${describe(error)}`) },
+    )
   }
 
   /** The session's watch bucket, created on demand. */
@@ -365,6 +399,8 @@ class SentinelRuntime {
    */
   private armFileWatch(watch: SessionWatch, id: string, target: string): void {
     if (watch.watchers.has(id) || this.disposed) return
+    const failedAt = watch.watchFailures.get(id)
+    if (failedAt !== undefined && Date.now() - failedAt < FILE_WATCH_RETRY_MS) return
     const arm = (path: string, mode: 'direct' | 'parent'): void => {
       try {
         const watcher = fsWatch(path, { persistent: false }, (_event, fileName) => {
@@ -374,10 +410,13 @@ class SentinelRuntime {
         watcher.on('error', () => {
           watcher.close()
           watch.watchers.delete(id)
+          watch.watchFailures.set(id, Date.now())
         })
         watch.watchers.set(id, { watcher, mode })
+        watch.watchFailures.delete(id)
       } catch {
-        // Fall back to heartbeat polling silently; the reconcile loop still covers this watch.
+        // Back off and fall back to heartbeat polling; the reconcile loop still covers this watch.
+        watch.watchFailures.set(id, Date.now())
       }
     }
     void stat(target).then(
