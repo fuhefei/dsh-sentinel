@@ -3,9 +3,11 @@
  * composer (official conversation.input.dock family, same visual language as
  * Goal / To-dos / task-status / loop) showing every active watch of the
  * current session: sensor, target, live probe state, fire budget, next probe
- * countdown — plus the recent fire history when expanded. Polls the node
- * half's read-only state route; renders nothing when the session has no
- * watches.
+ * countdown — plus the recent fire history when expanded. A sidebar branch
+ * under each watched session row (sidebar.workspaces.sessionRow.branch) makes
+ * the server-global watch set visible from the workspace tree, with a link to
+ * the node half's dashboard table. Polls the node half's read-only state
+ * route; renders nothing when the session has no watches.
  */
 import { useEffect, useState } from 'react'
 import type { Context } from 'cordis'
@@ -14,6 +16,8 @@ import { StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
 import type {} from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+// Type-only: pulls ui-workspace's SlotMap merges for the session-row holes.
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -24,6 +28,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 const STATE_PATH = '/plugins/dsh-sentinel/state'
+const DASHBOARD_PATH = '/plugins/dsh-sentinel/dashboard'
 const POLL_MS = 2000
 
 const NS = 'sentinel'
@@ -38,6 +43,10 @@ const zh = {
   'close': '收起',
   'history': '最近触发',
   'nofires': '尚未触发过',
+  'branch': '👁 哨兵 · {count} 个监控',
+  'dashboard': '全局总览 ↗',
+  'dormant': '休眠',
+  'live': '活跃',
 } satisfies Record<string, string>
 type SentinelKey = keyof typeof zh
 const en = {
@@ -51,6 +60,10 @@ const en = {
   'close': 'Collapse',
   'history': 'Recent fires',
   'nofires': 'No fires yet',
+  'branch': '👁 sentinel · {count} watch(es)',
+  'dashboard': 'All watches ↗',
+  'dormant': 'dormant',
+  'live': 'live',
 } satisfies Record<string, string>
 
 const SIDE_CLEARANCE = 'var(--dsh-composer-side-clearance, 16px)'
@@ -59,6 +72,7 @@ const CARD_MAX = 'var(--dsh-composer-card-max-width, 780px)'
 
 interface WireWatch {
   sessionId: string
+  live: boolean
   id: string
   kind: string
   target: string
@@ -105,6 +119,49 @@ function useSentinelState(sessionId: string): WireState {
     return () => { alive = false; clearInterval(timer) }
   }, [sessionId])
   return state
+}
+
+// Server-global watch set, shared by every sidebar branch instance: one
+// unfiltered state-route poll with reference-counted start/stop, so N watched
+// session rows cost one request per tick, not N.
+let globalWatches: readonly WireWatch[] = []
+const globalListeners = new Set<() => void>()
+let globalTimer: ReturnType<typeof setInterval> | undefined
+
+async function pollGlobal(): Promise<void> {
+  try {
+    const res = await fetch(STATE_PATH, { headers: { accept: 'application/json' } })
+    if (!res.ok) return
+    const data = (await res.json()) as Partial<WireState>
+    if (Array.isArray(data.watches)) {
+      globalWatches = data.watches
+      for (const listener of globalListeners) listener()
+    }
+  } catch {
+    // transient network error: keep the previous frame, retry next tick
+  }
+}
+
+function subscribeGlobal(listener: () => void): () => void {
+  globalListeners.add(listener)
+  if (globalTimer === undefined) {
+    void pollGlobal()
+    globalTimer = setInterval(() => { void pollGlobal() }, POLL_MS)
+  }
+  return () => {
+    globalListeners.delete(listener)
+    if (globalListeners.size === 0 && globalTimer !== undefined) {
+      clearInterval(globalTimer)
+      globalTimer = undefined
+    }
+  }
+}
+
+/** Subscribe to the server-global watch set (one shared poller per page). */
+function useGlobalWatches(): readonly WireWatch[] {
+  const [, force] = useState(0)
+  useEffect(() => subscribeGlobal(() => { force(n => n + 1) }), [])
+  return globalWatches
 }
 
 const KIND_GLYPHS: Record<string, string> = {
@@ -226,6 +283,73 @@ export function SentinelDock(
   )
 }
 
+/**
+ * Row-below sidebar branch: one instance per session row, fed by the shared
+ * global poller. Collapsed it is a single 👁 row with the watch count;
+ * expanded it lists this session's watches and links to the dashboard table.
+ * Renders nothing when the session has no watches, so unwatched rows are
+ * untouched.
+ */
+export function SentinelBranch(
+  props: PropsRuntime<'sidebar.workspaces.sessionRow.branch'> & PropsLocale<'sentinel'>,
+): ReactNode {
+  const { sessionId, t } = props
+  const watches = useGlobalWatches()
+  const [open, setOpen] = useState(false)
+  const mine = watches.filter(watch => watch.sessionId === sessionId)
+  if (mine.length === 0) return null
+
+  return (
+    <div
+      data-sentinel-branch=""
+      style={{
+        margin: '0 0 2px 26px',
+        borderLeft: '2px solid var(--dsw-alias-border-l1)',
+        paddingLeft: 10,
+        fontSize: 12,
+        fontFamily: 'system-ui',
+        color: 'var(--dsw-alias-label-caption)',
+      }}
+    >
+      <div
+        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer' }}
+        onClick={(e) => { e.stopPropagation(); setOpen(value => !value) }}
+      >
+        <span aria-hidden style={{ fontSize: 10 }}>{open ? '▾' : '▸'}</span>
+        <StateDot state="ongoing" size={8} />
+        <span>{t('branch', { count: mine.length })}</span>
+        <a
+          href={DASHBOARD_PATH}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => { e.stopPropagation() }}
+          style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--dsw-alias-label-caption)', textDecoration: 'none' }}
+        >
+          {t('dashboard')}
+        </a>
+      </div>
+      {open && mine.map(watch => (
+        <div
+          key={watch.id}
+          title={watch.pattern !== undefined ? `${watch.target}  /${watch.pattern}/\n${watch.note}` : `${watch.target}\n${watch.note}`}
+          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '1px 0 1px 16px', minWidth: 0 }}
+        >
+          <span style={{ flex: 'none', width: 12, textAlign: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>
+            {KIND_GLYPHS[watch.kind] ?? '•'}
+          </span>
+          <span style={{ flex: 'none' }}>{watch.id}</span>
+          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {watch.target}
+          </span>
+          <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>
+            {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 /** Required client services: slot registry and locale dictionaries. */
 export const inject = ['slots', 'locale']
 
@@ -238,4 +362,13 @@ export function apply(ctx: Context): void {
       order: 24,
       locale: NS,
     }, SentinelDock))
+  // The branch hole is declared by ui-workspace's browser registration, whose
+  // activation order is not constrained against this plugin; inject runs the
+  // register once the declaration lands (immediately when it already exists).
+  ctx.slots.inject('sidebar.workspaces.sessionRow.branch', () =>
+    ctx.slots.register({
+      name: 'sidebar.workspaces.sessionRow.branch',
+      id: 'sentinel',
+      locale: NS,
+    }, SentinelBranch))
 }

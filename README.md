@@ -10,6 +10,12 @@ The node half owns one server-lifetime runtime that folds a plugin-owned sidecar
 
 The browser half is a dock card above the composer (the `conversation.input.dock` family) listing the session's active watches — sensor, target, live probe state, fire budget, next-probe countdown — plus recent fire history when expanded. It polls the read-only state route and renders nothing when the session has no watches.
 
+Two surfaces make the server-global watch set visible. A sidebar branch grows under every session row that has active watches (`sidebar.workspaces.sessionRow.branch`, one shared poller for all rows) — collapsed it is a `👁` count, expanded it lists the session's watches and links to the dashboard. The dashboard is a standalone table of every watch across every session: session (active/dormant), sensor, target, pattern, fire budget, last probe state, next probe.
+
+| Sidebar branch | Global dashboard |
+| --- | --- |
+| ![Sidebar branch](docs/preview/sentinel-sidebar-branch.png) | ![Dashboard](docs/preview/sentinel-dashboard.png) |
+
 ## Sensors
 
 | Kind | Engine | Fires on |
@@ -30,7 +36,8 @@ With `pattern`, probe kinds fire on the no-match→match edge of that regex and 
 
 ## Routes
 
-- `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock.
+- `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar branch (omit `sessionId` for every session).
+- `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent.
 
 ## Install
@@ -46,12 +53,22 @@ Add the node half through a patch-list configuration over the shipped base:
 
 The browser half ships in the same package (`./client`) and is injected by the Web UI's plugin loader.
 
+### Sidebar branch prerequisite
+
+The dock and the dashboard work on a stock host. The sidebar branch needs the session-row extension holes, which the official tree does not declare yet; apply the bundled patch to your DSH source checkout and rebuild `ui-workspace`:
+
+```sh
+git apply /path/to/dsh-sentinel/patches/session-row-holes.patch
+```
+
+The patch declares `sidebar.workspaces.sessionRow` and `sidebar.workspaces.sessionRow.branch` as **list** holes (every registrant renders, in order) at **root** scope (sidebar rows render outside any session binding; the row passes its `sessionId` through owner props). [dsh-subagent-tree](https://github.com/dsh-external/dsh-subagent-tree) ships a patch for the same hole names with different semantics (keyed/session); apply one or the other, not both.
+
 ## Develop
 
 ```sh
 npm install
 npm run build     # tsc -b + tsdown (lib/index.js, lib/client.js)
-npm test          # vitest: domain fold/normalize, sensors, e2e wakeup flow
+npm test          # vitest: domain fold/normalize, sensors, dashboard escaping, e2e wakeup flow
 ```
 
 ## License

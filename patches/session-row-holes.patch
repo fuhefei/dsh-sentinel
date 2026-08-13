@@ -1,0 +1,176 @@
+diff --git a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
+index 0568ff51..ee82ba9b 100644
+--- a/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
++++ b/packages/client/ui-workspace/src/client/WorkspaceBrowser.tsx
+@@ -216,7 +216,7 @@ function workspaceGroupHalf(e: { clientY: number; currentTarget: HTMLElement }):
+ type SessionTreeProps = Pick<
+   WorkspaceBrowserProps,
+   'useSessions' | 'startSession' | 'open' | 'forkSession'
+-  | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't'
++  | 'insertWorkspaceBefore' | 'insertSessionBefore' | 't' | 'renderSlot'
+ > & {
+   workspaces: readonly WorkspaceView[]
+   /** Explicit persisted zero-or-five-session state by Workspace group. */
+@@ -251,7 +251,7 @@ function SessionTree({
+   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
+   insertWorkspaceBefore, insertSessionBefore, orderBy,
+   groupExpansion, setGroupExpanded,
+-  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
++  sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t, renderSlot,
+ }: SessionTreeProps) {
+   const list = useSessions(s => s)
+   const current = list.current
+@@ -518,6 +518,7 @@ function SessionTree({
+                     onArchive={onSessionArchive}
+                     drag={dragProps}
+                     t={t}
++                    renderSlot={renderSlot}
+                   />
+                 )
+               })}
+@@ -545,7 +546,7 @@ function SessionTree({
+ /** The flat "In one list" body: every session is one draggable top-level row. */
+ function FlatList({
+   useSessions, open, forkSession, onSessionRename, onSessionArchive, archivedSessionIds,
+-  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t,
++  orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder, t, renderSlot,
+ }: Pick<
+   SessionTreeProps,
+   | 'useSessions'
+@@ -560,6 +561,7 @@ function FlatList({
+   | 'syncSessionOrderAccount'
+   | 'setSessionOrder'
+   | 't'
++  | 'renderSlot'
+ >) {
+   const list = useSessions(s => s)
+   const baseRows = useMemo(
+@@ -653,6 +655,7 @@ function FlatList({
+                 },
+               }}
+               t={t}
++              renderSlot={renderSlot}
+             />
+           )
+         })}
+@@ -1131,6 +1134,7 @@ export function WorkspaceBrowser({
+                 syncSessionOrderAccount={actions.syncSessionOrderAccount}
+                 setSessionOrder={actions.setSessionOrder}
+                 t={t}
++                renderSlot={renderSlot}
+               />
+             )
+             : (
+@@ -1153,6 +1157,7 @@ export function WorkspaceBrowser({
+                 insertSessionBefore={insertSessionBefore}
+                 orderBy={orderBy}
+                 t={t}
++                renderSlot={renderSlot}
+                 onRenameRequest={(workspaceId, currentTitle) => {
+                   setRenameTarget({ workspaceId, currentTitle })
+                   setRenameDraft(currentTitle)
+diff --git a/packages/client/ui-workspace/src/client/contract/slots.ts b/packages/client/ui-workspace/src/client/contract/slots.ts
+index 8027a362..2dfbac7e 100644
+--- a/packages/client/ui-workspace/src/client/contract/slots.ts
++++ b/packages/client/ui-workspace/src/client/contract/slots.ts
+@@ -56,6 +56,16 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
+     'conversation.hero.workspace.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
+     /** Directory-flow hole under the sidebar browsing region (declared by the WorkspaceBrowser entry). */
+     'sidebar.workspaces.directoryFlow': { kind: 'single'; scope: 'root'; owner: DirectoryFlowOwnerProps }
++    /**
++     * Per-session-row extension hole inside the sidebar session row (declared
++     * by the WorkspaceBrowser entry). List kind: every registrant renders, in
++     * order — the owner does not pick occupants. Root scope: sidebar rows
++     * render outside any session binding, so the row passes its sessionId
++     * through owner props.
++     */
++    'sidebar.workspaces.sessionRow': { kind: 'list'; scope: 'root' }
++    /** Per-session-row branch hole rendered below the sidebar session row (declared by the WorkspaceBrowser entry). */
++    'sidebar.workspaces.sessionRow.branch': { kind: 'list'; scope: 'root' }
+   }
+ }
+ 
+@@ -140,7 +150,7 @@ export type WorkspaceBrowserInjected = DirectoryPickingInjected & {
+ /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */
+ export type WorkspaceBrowserProps =
+   PropsRuntime<'sidebar.workspaces'>
+-  & PropsRenderSlots<'sidebar.workspaces.directoryFlow'>
++  & PropsRenderSlots<'sidebar.workspaces.directoryFlow' | 'sidebar.workspaces.sessionRow' | 'sidebar.workspaces.sessionRow.branch'>
+   & PropsStore<ReturnType<typeof createWorkspaceViewStore>>
+   & Omit<WorkspaceBrowserInjected, 'hooks'>
+   & DirectoryPickingHooks
+diff --git a/packages/client/ui-workspace/src/client/index.ts b/packages/client/ui-workspace/src/client/index.ts
+index 6b14243e..5b926480 100644
+--- a/packages/client/ui-workspace/src/client/index.ts
++++ b/packages/client/ui-workspace/src/client/index.ts
+@@ -110,7 +110,11 @@ export function apply(ctx: ClientContext): void {
+   ctx.slots.inject('sidebar.workspaces', () => ctx.slots.register(
+     {
+       name: 'sidebar.workspaces',
+-      children: { 'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' } },
++      children: {
++        'sidebar.workspaces.directoryFlow': { kind: 'single', scope: 'root' },
++        'sidebar.workspaces.sessionRow': { kind: 'list', scope: 'root' },
++        'sidebar.workspaces.sessionRow.branch': { kind: 'list', scope: 'root' },
++      },
+       store: createWorkspaceViewStore(),
+       inject: browserInjected,
+       locale: NS,
+diff --git a/packages/client/ui-workspace/src/client/rows/Rows.tsx b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+index 481e0f0e..c4d60268 100644
+--- a/packages/client/ui-workspace/src/client/rows/Rows.tsx
++++ b/packages/client/ui-workspace/src/client/rows/Rows.tsx
+@@ -348,9 +348,11 @@ export function SearchResultItem({ result, currentId, onOpen, t }: {
+  * @param props.drag - optional draggable-row wiring.
+  * @param props.flat - omit the empty status slot in the hierarchy-free flat list.
+  * @param props.t - the browser root's locale seat.
++ * @param props.renderSlot - optional declared child-hole renderer (sessionRow
++ * in-row and sessionRow.branch below the row).
+  * @returns the session row.
+  */
+-export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t }: {
++export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork, onArchive, drag, flat = false, t, renderSlot }: {
+   node: SessionNode
+   currentId: string | undefined
+   now: number
+@@ -366,6 +368,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
+   /** The row is rendered without a parent Workspace header. */
+   flat?: boolean | undefined
+   t: RowTranslate
++  renderSlot?: WorkspaceBrowserProps['renderSlot']
+ }) {
+   const row = node
+   const title = displayTitle(node, t)
+@@ -428,6 +431,7 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
+         </span>
+       )}
+       <span className={css.title}>{title}</span>
++      {renderSlot !== undefined && renderSlot('sidebar.workspaces.sessionRow', { sessionId: node.id })}
+       {/* A blank New Session row is a provisional placeholder: nothing has
+           happened in it yet, so a "now" timestamp and the row verbs
+           (rename/fork/archive) would all act on content that does not
+@@ -463,13 +467,16 @@ export function SessionNodeItem({ node, currentId, now, onOpen, onRename, onFork
+     </div>
+   )
+   return (
+-    <HoverCard
+-      anchor={ownRow}
+-      content={<SessionHoverContent node={node} now={now} t={t} />}
+-      disabled={menuOpen || drag?.active === true}
+-      copyText={row.blank ? undefined : row.title}
+-      copyLabel={t('copy')}
+-      copiedLabel={t('hover.copied')}
+-    />
++    <>
++      <HoverCard
++        anchor={ownRow}
++        content={<SessionHoverContent node={node} now={now} t={t} />}
++        disabled={menuOpen || drag?.active === true}
++        copyText={row.blank ? undefined : row.title}
++        copyLabel={t('copy')}
++        copiedLabel={t('hover.copied')}
++      />
++      {renderSlot !== undefined && renderSlot('sidebar.workspaces.sessionRow.branch', { sessionId: node.id })}
++    </>
+   )
+ }

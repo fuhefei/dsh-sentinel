@@ -13,8 +13,9 @@
  * while a session sleeps (or the server is down) late-fire on the next probe.
  *
  * Registered tools: sentinel_watch / sentinel_list / sentinel_cancel.
- * Read-only route: /plugins/dsh-sentinel/state (browser dock renders it).
- * Push route: POST /plugins/dsh-sentinel/hook?id=watch-N (webhook sensors).
+ * Read-only routes: /plugins/dsh-sentinel/state (browser dock and sidebar
+ * branch render it) and /plugins/dsh-sentinel/dashboard (server-global watch
+ * table). Push route: POST /plugins/dsh-sentinel/hook?id=watch-N (webhooks).
  */
 import { watch as fsWatch, type FSWatcher } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -50,6 +51,7 @@ export const inject = ['agents', 'agentDefaultModel', 'tools', 'webServer']
 const PLUGIN_ID = 'dsh-sentinel'
 export const STATE_PATH = `/plugins/${PLUGIN_ID}/state`
 export const HOOK_PATH = `/plugins/${PLUGIN_ID}/hook`
+export const DASHBOARD_PATH = `/plugins/${PLUGIN_ID}/dashboard`
 const HEARTBEAT_MS = 5000
 const PUSH_DEBOUNCE_MS = 250
 const MAX_PENDING_WAKEUPS = 8
@@ -744,6 +746,141 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
   return disposers
 }
 
+/** Wire shape of one watch row on the transparency routes. */
+export interface WatchRow {
+  sessionId: string
+  live: boolean
+  id: string
+  kind: string
+  target: string
+  pattern?: string
+  intervalSeconds: number
+  note: string
+  fireCount: number
+  maxFires: number
+  createdAt: string
+  expiresAt?: string
+  lastState?: string
+  lastProbeAt?: number
+  nextDueAt?: number
+}
+
+/**
+ * Flatten the runtime's active subscriptions into wire rows.
+ * @param runtime - the server-lifetime sentinel runtime.
+ * @param ctx - host surface (agent liveness lookup).
+ * @param sessionId - empty for every session, or one session id to filter.
+ * @returns the watch rows (fires stay with the state route's own collection).
+ */
+function collectWatchRows(runtime: SentinelRuntime, ctx: ContextLike, sessionId: string): WatchRow[] {
+  const rows: WatchRow[] = []
+  for (const [id, watch] of runtime.view()) {
+    if (sessionId !== '' && id !== sessionId) continue
+    const live = ctx.agents.get(id) !== undefined
+    for (const sub of watch.folded.active.values()) {
+      const probeState = watch.probes.get(sub.id)
+      rows.push({
+        sessionId: id,
+        live,
+        id: sub.id,
+        kind: sub.spec.kind,
+        target: sub.spec.target,
+        pattern: sub.spec.pattern,
+        intervalSeconds: sub.spec.intervalSeconds,
+        note: sub.note,
+        fireCount: sub.fireCount,
+        maxFires: sub.maxFires,
+        createdAt: sub.createdAt,
+        expiresAt: sub.expiresAt,
+        lastState: probeState?.lastState,
+        lastProbeAt: probeState?.lastProbeAt,
+        nextDueAt: probeState?.nextDueAt,
+      })
+    }
+  }
+  return rows
+}
+
+/** Escape a user-controlled string for the dashboard HTML. */
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;')
+}
+
+/** One dashboard table row (server render and the client refresh share it). */
+function watchRowHtml(row: WatchRow): string {
+  const session = `${escapeHtml(row.sessionId.slice(0, 16))}… <small>${row.live ? '活跃' : '休眠'}</small>`
+  const pattern = row.pattern !== undefined ? `<code>/${escapeHtml(row.pattern)}/</code>` : '—'
+  const lastState = row.lastState !== undefined ? escapeHtml(row.lastState) : '探测中'
+  const next = row.kind === 'webhook'
+    ? '即时推送'
+    : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…'
+  return `<tr><td>${session}</td><td>${escapeHtml(row.id)}</td><td>${escapeHtml(row.kind)}</td>`
+    + `<td class="target" title="${escapeHtml(row.note)}">${escapeHtml(row.target)}</td><td>${pattern}</td>`
+    + `<td>${String(row.fireCount)}/${String(row.maxFires)}</td><td>${lastState}</td><td>${next}</td></tr>`
+}
+
+/**
+ * The server-global watch table page; the client script re-renders it from
+ * the state route. Exported for the escaping tests.
+ * @param rows - the watch rows to server-render into the initial table body.
+ * @returns the complete HTML document.
+ */
+export function dashboardHtml(rows: readonly WatchRow[]): string {
+  const body = rows.length === 0
+    ? '<tr><td colspan="8" class="empty">当前没有活跃的监控。</td></tr>'
+    : rows.map(watchRowHtml).join('')
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel 全局总览</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 24px; color: #1f2329; }
+  h1 { font-size: 16px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { border-bottom: 1px solid #e5e6eb; padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { color: #86909c; font-weight: 500; white-space: nowrap; }
+  td.target { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  td.empty { color: #86909c; text-align: center; padding: 24px; }
+  code { background: #f2f3f5; padding: 1px 4px; border-radius: 4px; }
+  small { color: #86909c; }
+</style>
+</head>
+<body>
+<h1>👁 Sentinel 全局总览 <small id="meta"></small></h1>
+<table>
+<thead><tr><th>会话</th><th>监控</th><th>传感器</th><th>目标</th><th>模式</th><th>触发</th><th>最近状态</th><th>下次探测</th></tr></thead>
+<tbody id="rows">${body}</tbody>
+</table>
+<script>
+const ROWS = document.getElementById('rows')
+const META = document.getElementById('meta')
+const render = ${watchRowHtml.toString()}
+const escapeHtml = ${escapeHtml.toString()}
+// watchRowHtml's body references Date.now through the next-probe cell; keep it.
+const refresh = async () => {
+  try {
+    const res = await fetch(${JSON.stringify(STATE_PATH)}, { headers: { accept: 'application/json' } })
+    if (!res.ok) return
+    const data = await res.json()
+    const watches = Array.isArray(data.watches) ? data.watches : []
+    ROWS.innerHTML = watches.length === 0
+      ? '<tr><td colspan="8" class="empty">当前没有活跃的监控。</td></tr>'
+      : watches.map(render).join('')
+    META.textContent = '· ' + String(watches.length) + ' 个监控 · ' + new Date().toLocaleTimeString()
+  } catch {}
+}
+refresh()
+setInterval(refresh, 3000)
+</script>
+</body>
+</html>
+`
+}
+
 export function apply(ctx: ContextLike): void {
   ctx.effect(() => {
     const runtime = new SentinelRuntime(ctx, new SentinelStore(storePath()))
@@ -756,31 +893,10 @@ export function apply(ctx: ContextLike): void {
         try {
           const url = new URL(req.url ?? '/', 'http://dsh.internal')
           const sessionId = url.searchParams.get('sessionId') ?? ''
-          const rows: unknown[] = []
+          const rows: unknown[] = collectWatchRows(runtime, ctx, sessionId)
           const fires: unknown[] = []
           for (const [id, watch] of runtime.view()) {
             if (sessionId !== '' && id !== sessionId) continue
-            const live = ctx.agents.get(id) !== undefined
-            for (const sub of watch.folded.active.values()) {
-              const probeState = watch.probes.get(sub.id)
-              rows.push({
-                sessionId: id,
-                live,
-                id: sub.id,
-                kind: sub.spec.kind,
-                target: sub.spec.target,
-                pattern: sub.spec.pattern,
-                intervalSeconds: sub.spec.intervalSeconds,
-                note: sub.note,
-                fireCount: sub.fireCount,
-                maxFires: sub.maxFires,
-                createdAt: sub.createdAt,
-                expiresAt: sub.expiresAt,
-                lastState: probeState?.lastState,
-                lastProbeAt: probeState?.lastProbeAt,
-                nextDueAt: probeState?.nextDueAt,
-              })
-            }
             fires.push(...watch.recentFires.map(fire => ({ sessionId: id, ...fire })))
           }
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
@@ -788,6 +904,20 @@ export function apply(ctx: ContextLike): void {
         } catch (error: unknown) {
           res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
           res.end(JSON.stringify({ error: describe(error) }))
+        }
+      },
+    })
+
+    const stopDashboard = ctx.webServer.register({
+      kind: 'exact',
+      path: DASHBOARD_PATH,
+      handler: (_req, res) => {
+        try {
+          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          res.end(dashboardHtml(collectWatchRows(runtime, ctx, '')))
+        } catch (error: unknown) {
+          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end(describe(error))
         }
       },
     })
@@ -848,6 +978,7 @@ export function apply(ctx: ContextLike): void {
     return () => {
       stopping = true
       stopRoute()
+      stopDashboard()
       stopHook()
       stopCreated()
       runtime.dispose()
