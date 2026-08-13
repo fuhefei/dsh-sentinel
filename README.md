@@ -42,7 +42,13 @@ With `pattern`, probe kinds fire on the no-match→match edge of that regex and 
 
 ## Install
 
-Add the node half through a patch-list configuration over the shipped base:
+One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
+
+```sh
+dsh plugin --profile web add "github:dsh-external/dsh-sentinel#main"
+```
+
+Alternatively, add the node half manually through a patch-list configuration over the shipped base:
 
 ```yaml
 # cordis.patch.yml

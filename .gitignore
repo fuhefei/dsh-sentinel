@@ -1,5 +1,8 @@
 node_modules/
-lib/
+lib/*
+!lib/index.js
+!lib/client.js
+!lib/client.js.map
 *.tsbuildinfo
 *.bak
 driver*.sh
