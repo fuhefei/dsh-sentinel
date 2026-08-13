@@ -1,6 +1,6 @@
 # dsh-sentinel
 
-Condition-driven wakeup for DeepSeek Harness: the agent registers a watch, goes to sleep — even closes the session — and the sentinel wakes it when the condition happens. Every subscription and every fire is a user-visible session event, and the browser dock shows what is on duty.
+Condition-driven wakeup for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): the agent registers a watch, goes to sleep — even closes the session — and the sentinel wakes it when the condition happens. Every subscription and every fire is a user-visible session event, and the browser dock shows what is on duty.
 
 ![Sentinel dock panel, expanded](docs/preview/sentinel-panel-expanded-crop.png)
 
