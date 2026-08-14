@@ -72,7 +72,7 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.7.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.8.0"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:
