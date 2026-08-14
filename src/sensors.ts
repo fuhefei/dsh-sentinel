@@ -22,6 +22,23 @@ export interface ProbeResult {
 const PROBE_TIMEOUT_MS = 10_000
 const SNAPSHOT_TAIL_BYTES = 8192
 
+/**
+ * Placeholder snapshots mean "the target itself is missing/unreachable", not
+ * content. Patterns must never match them: an any-content regex like [\s\S]+
+ * would otherwise fire on the very first probe of an absent file.
+ */
+const PLACEHOLDER_ABSENT = '<absent>'
+const PLACEHOLDER_UNREACHABLE = '<unreachable>'
+const PLACEHOLDER_NONE = '<none>'
+const PLACEHOLDER_PUSH_ONLY = '<push-only>'
+
+export function isPlaceholderSnapshot(snapshot: string): boolean {
+  return snapshot === PLACEHOLDER_ABSENT
+    || snapshot === PLACEHOLDER_UNREACHABLE
+    || snapshot === PLACEHOLDER_NONE
+    || snapshot === PLACEHOLDER_PUSH_ONLY
+}
+
 /** Read the tail of a file plus its identity line; missing file is a state, not an error. Only the trailing bytes are read, so huge files cost a bounded buffer. */
 async function probeFile(target: string): Promise<ProbeResult> {
   try {
@@ -44,7 +61,7 @@ async function probeFile(target: string): Promise<ProbeResult> {
       state: `exists (${String(info.size)} bytes)`,
     }
   } catch {
-    return { snapshot: '<absent>', state: 'absent' }
+    return { snapshot: PLACEHOLDER_ABSENT, state: 'absent' }
   }
 }
 
@@ -89,7 +106,7 @@ async function probeHttp(target: string): Promise<ProbeResult> {
       state: `HTTP ${String(response.status)}`,
     }
   } catch {
-    return { snapshot: '<unreachable>', state: 'unreachable' }
+    return { snapshot: PLACEHOLDER_UNREACHABLE, state: 'unreachable' }
   } finally {
     clearTimeout(timer)
   }
@@ -101,7 +118,7 @@ function probeProcess(target: string): Promise<ProbeResult> {
     execFile('pgrep', ['-af', target], { timeout: PROBE_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (_error, stdout) => {
       const lines = stdout.split('\n').filter(line => line.trim() !== '').sort()
       if (lines.length === 0) {
-        resolve({ snapshot: '<none>', state: 'no process' })
+        resolve({ snapshot: PLACEHOLDER_NONE, state: 'no process' })
         return
       }
       resolve({
@@ -140,7 +157,7 @@ export function probe(spec: SensorSpec): Promise<ProbeResult> {
     case 'http': return probeHttp(spec.target)
     case 'process': return probeProcess(spec.target)
     case 'port': return probePort(spec.target)
-    case 'webhook': return Promise.resolve({ snapshot: '<push-only>', state: 'awaiting push' })
+    case 'webhook': return Promise.resolve({ snapshot: PLACEHOLDER_PUSH_ONLY, state: 'awaiting push' })
   }
 }
 
@@ -150,6 +167,8 @@ export function probe(spec: SensorSpec): Promise<ProbeResult> {
  *
  * - With a pattern: fire on the no-match → match edge (level-triggered would
  *   re-fire forever; the cooldown alone should not have to carry that).
+ *   Placeholder snapshots never match, so the edge a content pattern waits
+ *   for is placeholder → real matching content.
  * - Without a pattern: fire on any snapshot change after the baseline.
  */
 export function shouldFire(
@@ -159,8 +178,8 @@ export function shouldFire(
 ): { fire: boolean; summary: string } {
   if (pattern !== undefined) {
     const regex = new RegExp(pattern, 'm')
-    const was = previous !== undefined && regex.test(previous)
-    const is = regex.test(current)
+    const was = previous !== undefined && !isPlaceholderSnapshot(previous) && regex.test(previous)
+    const is = !isPlaceholderSnapshot(current) && regex.test(current)
     if (!was && is) {
       const match = regex.exec(current)
       return { fire: true, summary: `模式 /${pattern}/ 开始匹配: ${match?.[0] ?? ''}` }

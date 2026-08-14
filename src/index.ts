@@ -962,7 +962,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       },
       pattern: {
         type: 'string',
-        description: 'Optional regex; probe kinds fire on its no-match→match transition, webhooks only accept matching payloads.',
+        description: 'Optional regex in JavaScript RegExp syntax (compiled with the m flag; RE2 inline flags like (?s) are invalid — write [\\s\\S]+ instead). Probe kinds fire on its no-match→match transition over real probe content; placeholder states (missing file, unreachable URL, no matching process) never match. Webhooks only accept payloads it matches.',
       },
       interval_seconds: {
         type: 'number',

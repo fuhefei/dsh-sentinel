@@ -25,6 +25,32 @@ describe('shouldFire', () => {
     const decision = shouldFire('INSTALL-\\w+', 'building', 'INSTALL-OK done')
     expect(decision.summary).toContain('INSTALL-OK')
   })
+
+  it('never matches placeholder snapshots, so any-content patterns hold while the target is missing', () => {
+    expect(shouldFire('[\\s\\S]+', undefined, '<absent>').fire).toBe(false)
+    expect(shouldFire('[\\s\\S]+', '<absent>', '<absent>').fire).toBe(false)
+    expect(shouldFire('s', undefined, '<unreachable>').fire).toBe(false)
+    expect(shouldFire('.', undefined, '<none>').fire).toBe(false)
+    expect(shouldFire('push', undefined, '<push-only>').fire).toBe(false)
+  })
+
+  it('fires on the placeholder to matching-content edge with a pattern', () => {
+    const content = 'size=6 mtime=1\nhello\n'
+    expect(shouldFire('[\\s\\S]+', '<absent>', content).fire).toBe(true)
+    expect(shouldFire('hello', '<absent>', content).fire).toBe(true)
+    expect(shouldFire('goodbye', '<absent>', content).fire).toBe(false)
+  })
+
+  it('does not re-arm a pattern fire when matching content disappears', () => {
+    const content = 'size=6 mtime=1\nhello\n'
+    expect(shouldFire('hello', content, '<absent>').fire).toBe(false)
+    expect(shouldFire('hello', content, content).fire).toBe(false)
+  })
+
+  it('still fires without a pattern when the target appears or disappears', () => {
+    expect(shouldFire(undefined, '<absent>', 'size=1 mtime=1\nx').fire).toBe(true)
+    expect(shouldFire(undefined, 'size=1 mtime=1\nx', '<absent>').fire).toBe(true)
+  })
 })
 
 describe('probe', () => {
