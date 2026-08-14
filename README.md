@@ -76,7 +76,7 @@ First-probe semantics: a pattern-less watch absorbs its first observation as the
 One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.8.2"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.10.0"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:
