@@ -485,6 +485,69 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(await post('id=watch-1&s=session-nobody', 'stray push')).toBe(404)
   }, 10_000)
 
+  it('fences browser-marked cross-site and rebound requests away from the routes', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never)
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({
+      kind: 'webhook',
+      target: 'ci-fence',
+      note: '栅栏验证',
+      max_fires: 5,
+      cooldown_seconds: 0,
+    }, {})
+
+    const hook = harness.routes.find(route => route.path === HOOK_PATH)
+    if (hook === undefined) throw new Error('hook route missing')
+    const post = async (headers: Record<string, string>): Promise<number> => {
+      return new Promise(resolve => {
+        const endListeners: Array<() => void> = []
+        const dataListeners: Array<(chunk?: unknown) => void> = []
+        const req = {
+          url: `${HOOK_PATH}?id=watch-1&s=session-e2e`,
+          method: 'POST',
+          headers,
+          on(event: 'data' | 'end', callback: (chunk?: unknown) => void) {
+            if (event === 'data') dataListeners.push(callback)
+            else endListeners.push(callback as () => void)
+          },
+        }
+        let status = 0
+        const res = { writeHead(code: number) { status = code }, end() { resolve(status) } }
+        void hook.handler(req, res)
+        for (const listener of dataListeners) listener('push')
+        for (const listener of endListeners) listener()
+      })
+    }
+    // Drive-by webpage: cross-site marker.
+    expect(await post({ 'sec-fetch-site': 'cross-site', origin: 'http://evil.example' })).toBe(403)
+    // DNS rebinding: Origin matches Host, but the authority is a DNS name.
+    expect(await post({ origin: 'http://evil.example:3080', host: 'evil.example:3080', 'sec-fetch-site': 'same-origin' })).toBe(403)
+    // Same-origin browser request from the dashboard: allowed.
+    expect(await post({ origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' })).toBe(200)
+    // Headerless clients (curl, CI): allowed.
+    expect(await post({})).toBe(200)
+
+    const stateRoute = harness.routes.find(route => route.path === STATE_PATH)
+    if (stateRoute === undefined) throw new Error('state route missing')
+    const getState = async (headers: Record<string, string>): Promise<number> => {
+      return new Promise(resolve => {
+        const req = { url: STATE_PATH, method: 'GET', headers, on: () => {} }
+        let status = 0
+        const res = { writeHead(code: number) { status = code }, end() { resolve(status) } }
+        void stateRoute.handler(req, res)
+      })
+    }
+    expect(await getState({ host: 'evil.example:3080', 'sec-fetch-site': 'same-origin' })).toBe(403)
+    expect(await getState({})).toBe(200)
+  }, 10_000)
+
   it('cancels manually through the route and surfaces pending wakeups', async () => {
     await freshHome()
     const harness = makeHarness()

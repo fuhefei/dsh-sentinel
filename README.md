@@ -67,13 +67,16 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 - `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
+- All four routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
+
+First-probe semantics: a pattern-less watch absorbs its first observation as the baseline (no fire), while a pattern watch whose target already matches fires on the first probe — the condition already holds.
 
 ## Install
 
 One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.9.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.8.2"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:

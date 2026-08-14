@@ -452,6 +452,7 @@ export function renderWakeup(sub: Subscription, fact: FireFact): string {
     '',
     `你注册时留给自己的便签:\n${sub.note}`,
     '',
+    '以上是哨兵条件唤醒：按便签处理完本次触发即停；除非用户或便签要求，不要重新注册监控、不要展开无关调查。',
     fact.fireNumber >= sub.maxFires
       ? '这是最后一次触发，该订阅已自动结束。'
       : `剩余 ${String(sub.maxFires - fact.fireNumber)} 次触发额度；如果不再需要，用 sentinel_cancel 工具取消（id: "${sub.id}"）。`,

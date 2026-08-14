@@ -48,6 +48,23 @@ describe('dashboardHtml', () => {
     expect(html).toContain('data-session="&quot;&gt;&lt;img')
   })
 
+  it('renders recent fires and dropped-wakeup badges with escaping', () => {
+    const html = dashboardHtml(
+      [row()],
+      [{ sessionId: 'session-00000000-0000-0000-0000-000000000000', id: 'watch-1', at: '2026-01-01T00:00:00.000Z', summary: '模式 /x/ 开始匹配: <b>y</b>' }],
+      { 'session-00000000-0000-0000-0000-000000000000': 3 },
+    )
+    expect(html).toContain('<h2 id="firesTitle">最近触发</h2>')
+    expect(html).toContain('&lt;b&gt;y&lt;/b&gt;')
+    expect(html).toContain('已丢弃 3 唤醒')
+  })
+
+  it('renders the empty fires state and no badge by default', () => {
+    const html = dashboardHtml([row()])
+    expect(html).toContain('尚未触发过。')
+    expect(html).not.toContain('>已丢弃')
+  })
+
   it('escapes user-controlled fields so watch input cannot inject markup', () => {
     const html = dashboardHtml([row({
       target: '"><script>alert(1)</script>',

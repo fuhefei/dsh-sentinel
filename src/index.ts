@@ -173,6 +173,7 @@ interface ContextLike {
       handler: (req: {
         url?: string
         method?: string
+        headers?: Record<string, string | string[] | undefined>
         on(event: 'data' | 'end', callback: (chunk?: unknown) => void): void
       }, res: {
         writeHead(status: number, headers: Record<string, string>): void
@@ -180,6 +181,52 @@ interface ContextLike {
       }) => void | Promise<void>
     }): () => void
   }
+}
+
+/**
+ * Browser-trust fence for this plugin's routes. The host fences its own /api
+ * channels against cross-site POSTs and DNS rebinding, but plugin routes live
+ * under /plugins/* outside that fence — and the hook route can wake a
+ * full-access agent. Mirror the essentials: reject browser-marked cross-site
+ * requests, and reject browser-marked requests whose Host/Origin authority is
+ * a DNS name (rebinding cannot forge Host, and IP/localhost literals cannot
+ * be rebound). Headerless clients (curl, CI jobs) pass untouched.
+ */
+function isLocalAuthority(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '')
+  if (h === 'localhost' || h.endsWith('.localhost')) return true
+  if (/^127\.\d+\.\d+\.\d+$/.test(h)) return true
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(h)) return true
+  if (h.includes(':') && /^[0-9a-f:.]+$/.test(h)) return true
+  return false
+}
+
+function requestAllowed(req: { headers?: Record<string, string | string[] | undefined> }): boolean {
+  const headers = req.headers
+  if (headers === undefined) return true
+  const read = (name: string): string | undefined => {
+    const value = headers[name]
+    return Array.isArray(value) ? value[0] : value
+  }
+  const site = read('sec-fetch-site')
+  if (site === 'cross-site') return false
+  const origin = read('origin')
+  const host = read('host')
+  const browserMarked = site !== undefined || (origin !== undefined && origin !== 'null')
+  if (!browserMarked) return true
+  let authority = host ?? ''
+  if (origin !== undefined && origin !== 'null') {
+    let parsed: URL
+    try {
+      parsed = new URL(origin)
+    } catch {
+      return false
+    }
+    if (host !== undefined && parsed.host.toLowerCase() !== host.toLowerCase()) return false
+    authority = parsed.host
+  }
+  const hostname = authority.replace(/:\d+$/, '')
+  return isLocalAuthority(hostname)
 }
 
 /** Per-subscription probe bookkeeping (in-memory; persisted baselines re-seed it). */
@@ -214,6 +261,8 @@ class SessionWatch {
   readonly pushTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly recentFires: FireRecord[] = []
   readonly pendingWakeups: string[] = []
+  /** Cumulative wakeups dropped by the pending-queue cap (visible, not silent). */
+  droppedWakeups = 0
 
   constructor(readonly sessionId: string) {}
 
@@ -372,7 +421,13 @@ class SentinelRuntime {
   private requeueUndelivered(watch: SessionWatch): void {
     const pending = watch.folded.undeliveredFires
     if (pending.length === 0) return
-    watch.pendingWakeups.push(...pending.slice(-this.config.maxPendingWakeups).map(entry => renderWakeup(entry.sub, entry.fact)))
+    const capped = pending.slice(-this.config.maxPendingWakeups)
+    watch.pendingWakeups.push(...capped.map(entry => renderWakeup(entry.sub, entry.fact)))
+    const dropped = pending.length - capped.length
+    if (dropped > 0) {
+      watch.droppedWakeups += dropped
+      this.warn(`requeue for "${watch.sessionId}": dropped ${String(dropped)} oldest undelivered wakeup(s) over the cap`)
+    }
     this.warn(`requeued ${String(pending.length)} undelivered wakeup(s) for "${watch.sessionId}"`)
   }
 
@@ -454,6 +509,19 @@ class SentinelRuntime {
   /** All watches, for the state route. */
   view(): ReadonlyMap<string, SessionWatch> {
     return this.watches
+  }
+
+  /** Duty-lease liveness for the transparency routes: who owns duty and how fresh its heartbeat is. */
+  async dutyStatus(): Promise<{ pid: number; at: number; ageMs: number; stale: boolean } | undefined> {
+    const lease = await this.readLease()
+    if (lease === undefined) return undefined
+    const ageMs = Date.now() - lease.at
+    return {
+      pid: lease.pid,
+      at: lease.at,
+      ageMs,
+      stale: ageMs >= this.config.dutyLeaseTtlMs || !this.pidAlive(lease.pid),
+    }
   }
 
   /** Resolve the session for an inbound webhook push. Watch ids are only
@@ -755,6 +823,7 @@ class SentinelRuntime {
     if (watch.pendingWakeups.length > this.config.maxPendingWakeups) {
       const dropped = watch.pendingWakeups.length - this.config.maxPendingWakeups
       watch.pendingWakeups.splice(0, dropped)
+      watch.droppedWakeups += dropped
       this.warn(`pending wakeup overflow for "${watch.sessionId}": dropped ${String(dropped)} oldest (agent busy?)`)
     }
   }
@@ -1179,8 +1248,11 @@ export function localizeState(state: string, zh: boolean): string {
 }
 
 /** One dashboard row; shared by the server-side initial render (zh) and the page script (browser language). */
-function watchRowHtml(row: WatchRow, zh: boolean = true): string {
-  const session = `${escapeHtml(row.sessionId.slice(0, 16))}… <small>${row.live ? (zh ? '活跃' : 'live') : (zh ? '休眠' : 'dormant')}</small>`
+function watchRowHtml(row: WatchRow, zh: boolean = true, dropped: number = 0): string {
+  const droppedBadge = dropped > 0
+    ? ` <small class="dropped">${zh ? `已丢弃 ${String(dropped)} 唤醒` : `${String(dropped)} dropped`}</small>`
+    : ''
+  const session = `${escapeHtml(row.sessionId.slice(0, 16))}… <small>${row.live ? (zh ? '活跃' : 'live') : (zh ? '休眠' : 'dormant')}</small>${droppedBadge}`
   const pattern = row.pattern !== undefined ? `<code>/${escapeHtml(row.pattern)}/</code>` : '—'
   const lastState = row.lastState !== undefined ? escapeHtml(localizeState(row.lastState, zh)) : (zh ? '探测中' : 'probing')
   const next = row.kind === 'webhook'
@@ -1200,12 +1272,22 @@ function watchRowHtml(row: WatchRow, zh: boolean = true): string {
  * The server-global watch table page; the client script re-renders it from
  * the state route. Exported for the escaping tests.
  * @param rows - the watch rows to server-render into the initial table body.
+ * @param fires - recent fires across sessions (initial render + template).
+ * @param dropped - cumulative dropped wakeups per session id (badges).
  * @returns the complete HTML document.
  */
-export function dashboardHtml(rows: readonly WatchRow[]): string {
+export function dashboardHtml(
+  rows: readonly WatchRow[],
+  fires: ReadonlyArray<{ sessionId: string; id: string; at: string; summary: string }> = [],
+  dropped: Readonly<Record<string, number>> = {},
+): string {
   const body = rows.length === 0
     ? '<tr><td colspan="9" class="empty">当前没有活跃的监控。</td></tr>'
-    : rows.map(row => watchRowHtml(row)).join('')
+    : rows.map(row => watchRowHtml(row, true, dropped[row.sessionId] ?? 0)).join('')
+  const fireRows = fires.length === 0
+    ? '<tr><td colspan="4" class="empty">尚未触发过。</td></tr>'
+    : fires.map(fire => `<tr><td>${escapeHtml(new Date(fire.at).toLocaleTimeString())}</td><td>${escapeHtml(fire.id)}</td>`
+      + `<td>${escapeHtml(fire.sessionId.slice(0, 16))}…</td><td class="target">${escapeHtml(fire.summary)}</td></tr>`).join('')
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1233,6 +1315,8 @@ export function dashboardHtml(rows: readonly WatchRow[]): string {
   code { background: var(--s-code); padding: 1px 4px; border-radius: 4px; }
   small { color: var(--s-muted); }
   small.pending { color: #d4a72c; }
+  small.dropped { color: #e5484d; }
+  h2 { font-size: 13px; color: var(--s-muted); font-weight: 500; margin: 18px 0 6px; }
   .cancel { border: none; background: transparent; color: var(--s-muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
   .cancel:hover { color: #e5484d; background: rgba(229, 72, 77, .1); }
 </style>
@@ -1243,8 +1327,14 @@ export function dashboardHtml(rows: readonly WatchRow[]): string {
 <thead><tr><th>会话</th><th>监控</th><th>传感器</th><th>目标</th><th>模式</th><th>触发</th><th>最近状态</th><th>下次探测</th><th></th></tr></thead>
 <tbody id="rows">${body}</tbody>
 </table>
+<h2 id="firesTitle">最近触发</h2>
+<table>
+<thead><tr><th>时间</th><th>监控</th><th>会话</th><th>摘要</th></tr></thead>
+<tbody id="fires">${fireRows}</tbody>
+</table>
 <script>
 const ROWS = document.getElementById('rows')
+const FIRES = document.getElementById('fires')
 const META = document.getElementById('meta')
 const isZh = navigator.language.startsWith('zh')
 document.documentElement.lang = isZh ? 'zh-CN' : 'en'
@@ -1253,13 +1343,23 @@ const DICT = isZh ? {} : {
   heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe', ''],
   empty: 'No active watches right now.',
   count: 'watch(es)',
+  firesTitle: 'Recent fires',
+  fireHeads: ['Time', 'Watch', 'Session', 'Summary'],
+  firesEmpty: 'No fires yet.',
+  duty: function (age, stale) { return stale ? 'duty heartbeat stale (' + age + 's ago)' : 'duty heartbeat ' + age + 's ago' },
+  dutyNone: 'no resident duty process',
 }
 if (!isZh) {
   document.getElementById('title').textContent = '👁 ' + DICT.title
-  document.querySelectorAll('thead th').forEach((th, i) => { th.textContent = DICT.heads[i] })
+  document.getElementById('firesTitle').textContent = DICT.firesTitle
+  document.querySelectorAll('thead th').forEach(function (th, i) {
+    const fireHead = th.closest('table') !== null && document.querySelectorAll('thead')[1] !== undefined && th.closest('thead') === document.querySelectorAll('thead')[1]
+    const set = fireHead ? DICT.fireHeads : DICT.heads
+    th.textContent = set[i]
+  })
 }
 const localizeState = ${localizeState.toString()}
-const render = (row) => (${watchRowHtml.toString()})(row, isZh)
+const render = (row, dropped) => (${watchRowHtml.toString()})(row, isZh, dropped || 0)
 const escapeHtml = ${escapeHtml.toString()}
 // watchRowHtml's body references Date.now through the next-probe cell; keep it.
 const CANCEL_URL = ${JSON.stringify(CANCEL_PATH)}
@@ -1279,10 +1379,23 @@ const refresh = async () => {
     if (!res.ok) return
     const data = await res.json()
     const watches = Array.isArray(data.watches) ? data.watches : []
+    const droppedMap = data.droppedWakeups || {}
     ROWS.innerHTML = watches.length === 0
       ? '<tr><td colspan="9" class="empty">' + (isZh ? '当前没有活跃的监控。' : DICT.empty) + '</td></tr>'
-      : watches.map(render).join('')
-    META.textContent = '· ' + String(watches.length) + ' ' + (isZh ? '个监控' : DICT.count) + ' · ' + new Date().toLocaleTimeString()
+      : watches.map(w => render(w, droppedMap[w.sessionId])).join('')
+    const fires = Array.isArray(data.recentFires) ? data.recentFires : []
+    FIRES.innerHTML = fires.length === 0
+      ? '<tr><td colspan="4" class="empty">' + (isZh ? '尚未触发过。' : DICT.firesEmpty) + '</td></tr>'
+      : fires.map(f => '<tr><td>' + escapeHtml(new Date(f.at).toLocaleTimeString()) + '</td><td>' + escapeHtml(String(f.id))
+        + '</td><td>' + escapeHtml(String(f.sessionId).slice(0, 16)) + '…</td><td class="target">' + escapeHtml(String(f.summary)) + '</td></tr>').join('')
+    let dutyText = isZh ? '无常驻值守进程' : DICT.dutyNone
+    if (data.duty !== null && data.duty !== undefined) {
+      const age = Math.max(0, Math.round(data.duty.ageMs / 1000))
+      dutyText = isZh
+        ? '值守心跳 ' + age + 's 前' + (data.duty.stale ? '（疑似停摆）' : '')
+        : DICT.duty(age, data.duty.stale)
+    }
+    META.textContent = '· ' + String(watches.length) + ' ' + (isZh ? '个监控' : DICT.count) + ' · ' + dutyText + ' · ' + new Date().toLocaleTimeString()
   } catch {}
 }
 refresh()
@@ -1304,18 +1417,26 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
   const stopRoute = webServer.register({
     kind: 'exact',
     path: STATE_PATH,
-    handler: (req, res) => {
+    handler: async (req, res) => {
       try {
+        if (!requestAllowed(req)) {
+          res.writeHead(403, { 'content-type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ error: 'forbidden' }))
+          return
+        }
         const url = new URL(req.url ?? '/', 'http://dsh.internal')
         const sessionId = url.searchParams.get('sessionId') ?? ''
         const rows: unknown[] = collectWatchRows(runtime, ctx, sessionId)
         const fires: unknown[] = []
+        const dropped: Record<string, number> = {}
         for (const [id, watch] of runtime.view()) {
           if (sessionId !== '' && id !== sessionId) continue
           fires.push(...watch.recentFires.map(fire => ({ sessionId: id, ...fire })))
+          if (watch.droppedWakeups > 0) dropped[id] = watch.droppedWakeups
         }
+        const duty = await runtime.dutyStatus()
         res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-        res.end(JSON.stringify({ watches: rows, recentFires: fires }))
+        res.end(JSON.stringify({ watches: rows, recentFires: fires, droppedWakeups: dropped, duty }))
       } catch (error: unknown) {
         res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify({ error: describe(error) }))
@@ -1326,10 +1447,22 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
   const stopDashboard = webServer.register({
     kind: 'exact',
     path: DASHBOARD_PATH,
-    handler: (_req, res) => {
+    handler: (req, res) => {
       try {
+        if (!requestAllowed(req)) {
+          res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+          res.end('forbidden')
+          return
+        }
+        const rows = collectWatchRows(runtime, ctx, '')
+        const fires: Array<{ sessionId: string } & FireRecord> = []
+        const dropped: Record<string, number> = {}
+        for (const [id, watch] of runtime.view()) {
+          fires.push(...watch.recentFires.map(fire => ({ sessionId: id, ...fire })))
+          if (watch.droppedWakeups > 0) dropped[id] = watch.droppedWakeups
+        }
         res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-        res.end(dashboardHtml(collectWatchRows(runtime, ctx, '')))
+        res.end(dashboardHtml(rows, fires, dropped))
       } catch (error: unknown) {
         res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(describe(error))
@@ -1344,6 +1477,10 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
       const respond = (status: number, body: Record<string, unknown>): void => {
         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify(body))
+      }
+      if (!requestAllowed(req)) {
+        respond(403, { fired: false, reason: 'forbidden' })
+        return
       }
       if ((req.method ?? 'GET') !== 'POST') {
         respond(405, { fired: false, reason: 'POST only' })
@@ -1376,6 +1513,10 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
       const respond = (status: number, body: Record<string, unknown>): void => {
         res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
         res.end(JSON.stringify(body))
+      }
+      if (!requestAllowed(req)) {
+        respond(403, { cancelled: false, reason: 'forbidden' })
+        return
       }
       if ((req.method ?? 'GET') !== 'POST') {
         respond(405, { cancelled: false, reason: 'POST only' })
