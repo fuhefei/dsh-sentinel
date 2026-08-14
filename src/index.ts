@@ -120,6 +120,7 @@ export const Config: Schema<Config> = Schema.object({
 const PLUGIN_ID = 'dsh-sentinel'
 export const STATE_PATH = `/plugins/${PLUGIN_ID}/state`
 export const HOOK_PATH = `/plugins/${PLUGIN_ID}/hook`
+export const CANCEL_PATH = `/plugins/${PLUGIN_ID}/cancel`
 export const DASHBOARD_PATH = `/plugins/${PLUGIN_ID}/dashboard`
 const PUSH_DEBOUNCE_MS = 250
 /** fsWatch arm failures back off this long before retrying (heartbeat polling covers the gap). */
@@ -576,7 +577,7 @@ class SentinelRuntime {
   }
 
   /** Cancel durably — a sidecar write, no session involvement. */
-  async cancel(sessionId: string, id: string, reason: 'agent' | 'expired' | 'exhausted'): Promise<boolean> {
+  async cancel(sessionId: string, id: string, reason: 'agent' | 'user' | 'expired' | 'exhausted'): Promise<boolean> {
     const watch = this.watches.get(sessionId)
     if (watch === undefined || !watch.folded.active.has(id)) return false
     await this.commit(watch, {
@@ -1112,6 +1113,8 @@ export interface WatchRow {
   lastState?: string
   lastProbeAt?: number
   nextDueAt?: number
+  /** Fires logged but not yet delivered to the session (dormant or gone). */
+  pendingWakeups: number
 }
 
 /**
@@ -1144,6 +1147,7 @@ function collectWatchRows(runtime: SentinelRuntime, ctx: ContextLike, sessionId:
         lastState: probeState?.lastState,
         lastProbeAt: probeState?.lastProbeAt,
         nextDueAt: probeState?.nextDueAt,
+        pendingWakeups: watch.pendingWakeups.length,
       })
     }
   }
@@ -1182,9 +1186,14 @@ function watchRowHtml(row: WatchRow, zh: boolean = true): string {
   const next = row.kind === 'webhook'
     ? (zh ? '即时推送' : 'live push')
     : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…'
+  const pending = row.pendingWakeups > 0
+    ? ` <small class="pending">${zh ? `待投递 ${String(row.pendingWakeups)}` : `${String(row.pendingWakeups)} pending`}</small>`
+    : ''
   return `<tr><td>${session}</td><td>${escapeHtml(row.id)}</td><td>${escapeHtml(row.kind)}</td>`
     + `<td class="target" title="${escapeHtml(row.note)}">${escapeHtml(row.target)}</td><td>${pattern}</td>`
-    + `<td>${String(row.fireCount)}/${String(row.maxFires)}</td><td>${lastState}</td><td>${next}</td></tr>`
+    + `<td>${String(row.fireCount)}/${String(row.maxFires)}${pending}</td><td>${lastState}</td><td>${next}</td>`
+    + `<td><button type="button" class="cancel" data-session="${escapeHtml(row.sessionId)}" data-id="${escapeHtml(row.id)}"`
+    + ` title="${zh ? '取消这个监控' : 'Cancel this watch'}" aria-label="${zh ? '取消' : 'Cancel'} ${escapeHtml(row.id)}">×</button></td></tr>`
 }
 
 /**
@@ -1195,7 +1204,7 @@ function watchRowHtml(row: WatchRow, zh: boolean = true): string {
  */
 export function dashboardHtml(rows: readonly WatchRow[]): string {
   const body = rows.length === 0
-    ? '<tr><td colspan="8" class="empty">当前没有活跃的监控。</td></tr>'
+    ? '<tr><td colspan="9" class="empty">当前没有活跃的监控。</td></tr>'
     : rows.map(row => watchRowHtml(row)).join('')
   return `<!doctype html>
 <html lang="zh-CN">
@@ -1223,12 +1232,15 @@ export function dashboardHtml(rows: readonly WatchRow[]): string {
   td.empty { color: var(--s-muted); text-align: center; padding: 24px; }
   code { background: var(--s-code); padding: 1px 4px; border-radius: 4px; }
   small { color: var(--s-muted); }
+  small.pending { color: #d4a72c; }
+  .cancel { border: none; background: transparent; color: var(--s-muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
+  .cancel:hover { color: #e5484d; background: rgba(229, 72, 77, .1); }
 </style>
 </head>
 <body>
 <h1><span id="title">👁 Sentinel 全局总览</span> <small id="meta"></small></h1>
 <table>
-<thead><tr><th>会话</th><th>监控</th><th>传感器</th><th>目标</th><th>模式</th><th>触发</th><th>最近状态</th><th>下次探测</th></tr></thead>
+<thead><tr><th>会话</th><th>监控</th><th>传感器</th><th>目标</th><th>模式</th><th>触发</th><th>最近状态</th><th>下次探测</th><th></th></tr></thead>
 <tbody id="rows">${body}</tbody>
 </table>
 <script>
@@ -1238,7 +1250,7 @@ const isZh = navigator.language.startsWith('zh')
 document.documentElement.lang = isZh ? 'zh-CN' : 'en'
 const DICT = isZh ? {} : {
   title: 'Sentinel overview',
-  heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe'],
+  heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe', ''],
   empty: 'No active watches right now.',
   count: 'watch(es)',
 }
@@ -1250,6 +1262,17 @@ const localizeState = ${localizeState.toString()}
 const render = (row) => (${watchRowHtml.toString()})(row, isZh)
 const escapeHtml = ${escapeHtml.toString()}
 // watchRowHtml's body references Date.now through the next-probe cell; keep it.
+const CANCEL_URL = ${JSON.stringify(CANCEL_PATH)}
+ROWS.addEventListener('click', (event) => {
+  const button = event.target && event.target.closest ? event.target.closest('[data-cancel], .cancel') : null
+  if (button === null) return
+  const sessionId = button.getAttribute('data-session')
+  const id = button.getAttribute('data-id')
+  if (sessionId === null || id === null) return
+  button.disabled = true
+  void fetch(CANCEL_URL + '?sessionId=' + encodeURIComponent(sessionId) + '&id=' + encodeURIComponent(id), { method: 'POST' })
+    .then(() => refresh(), () => { button.disabled = false })
+})
 const refresh = async () => {
   try {
     const res = await fetch(${JSON.stringify(STATE_PATH)}, { headers: { accept: 'application/json' } })
@@ -1257,7 +1280,7 @@ const refresh = async () => {
     const data = await res.json()
     const watches = Array.isArray(data.watches) ? data.watches : []
     ROWS.innerHTML = watches.length === 0
-      ? '<tr><td colspan="8" class="empty">' + (isZh ? '当前没有活跃的监控。' : DICT.empty) + '</td></tr>'
+      ? '<tr><td colspan="9" class="empty">' + (isZh ? '当前没有活跃的监控。' : DICT.empty) + '</td></tr>'
       : watches.map(render).join('')
     META.textContent = '· ' + String(watches.length) + ' ' + (isZh ? '个监控' : DICT.count) + ' · ' + new Date().toLocaleTimeString()
   } catch {}
@@ -1346,10 +1369,39 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
     },
   })
 
+  const stopCancel = webServer.register({
+    kind: 'exact',
+    path: CANCEL_PATH,
+    handler: (req, res) => {
+      const respond = (status: number, body: Record<string, unknown>): void => {
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify(body))
+      }
+      if ((req.method ?? 'GET') !== 'POST') {
+        respond(405, { cancelled: false, reason: 'POST only' })
+        return
+      }
+      const url = new URL(req.url ?? '/', 'http://dsh.internal')
+      const sessionId = url.searchParams.get('sessionId') ?? ''
+      const id = url.searchParams.get('id') ?? ''
+      if (sessionId === '' || id === '') {
+        respond(400, { cancelled: false, reason: 'sessionId and id are required' })
+        return
+      }
+      void runtime.cancel(sessionId, id, 'user').then(
+        ok => respond(ok ? 200 : 404, ok
+          ? { cancelled: true, sessionId, id }
+          : { cancelled: false, reason: 'no such watch' }),
+        (error: unknown) => respond(500, { cancelled: false, reason: describe(error) }),
+      )
+    },
+  })
+
   return () => {
     stopRoute()
     stopDashboard()
     stopHook()
+    stopCancel()
   }
 }
 

@@ -59,6 +59,7 @@ declare module 'cordis' {
 
 const STATE_PATH = '/plugins/dsh-sentinel/state'
 const DASHBOARD_PATH = '/plugins/dsh-sentinel/dashboard'
+const CANCEL_PATH = '/plugins/dsh-sentinel/cancel'
 const POLL_MS = 2000
 
 const NS = 'sentinel'
@@ -81,6 +82,8 @@ const zh = {
   'live': '活跃',
   'tab': '哨兵监控',
   'tabempty': '当前没有活跃的监控。',
+  'cancel': '取消这个监控',
+  'pending': '{n} 个唤醒待投递',
 } satisfies Record<string, string>
 type SentinelKey = keyof typeof zh
 const en = {
@@ -102,6 +105,8 @@ const en = {
   'live': 'live',
   'tab': 'Sentinel',
   'tabempty': 'No active watches right now.',
+  'cancel': 'Cancel this watch',
+  'pending': '{n} wakeup(s) pending',
 } satisfies Record<string, string>
 
 const SIDE_CLEARANCE = 'var(--dsh-composer-side-clearance, 16px)'
@@ -122,6 +127,7 @@ interface WireWatch {
   lastState?: string
   lastProbeAt?: number
   nextDueAt?: number
+  pendingWakeups?: number
 }
 
 interface WireFire {
@@ -261,6 +267,30 @@ function countdown(nextDueAt: number | undefined): string {
   return `${String(Math.max(0, Math.ceil((nextDueAt - Date.now()) / 1000)))}`
 }
 
+/** Manual cancel, fire-and-forget; the next poll tick removes the row. */
+function cancelWatch(watch: WireWatch): void {
+  void fetch(`${CANCEL_PATH}?sessionId=${encodeURIComponent(watch.sessionId)}&id=${encodeURIComponent(watch.id)}`, { method: 'POST' })
+}
+
+function pendingSuffix(watch: WireWatch, t: (key: SentinelKey, values?: Record<string, unknown>) => string): string {
+  return watch.pendingWakeups !== undefined && watch.pendingWakeups > 0
+    ? ` · ${t('pending', { n: watch.pendingWakeups })}`
+    : ''
+}
+
+function CancelButton(props: { watch: WireWatch; t: (key: SentinelKey) => string }): ReactNode {
+  const { watch, t } = props
+  return (
+    <button
+      type="button"
+      title={t('cancel')}
+      aria-label={`${t('cancel')} ${watch.id}`}
+      onClick={(e) => { e.stopPropagation(); cancelWatch(watch) }}
+      style={{ flex: 'none', border: 'none', background: 'transparent', padding: '0 4px', fontSize: 13, lineHeight: '16px', color: 'var(--dsw-alias-label-caption)', cursor: 'pointer' }}
+    >×</button>
+  )
+}
+
 /** One watch row: glyph, id, target, live state, budget, cadence. */
 function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Record<string, unknown>) => string }): ReactNode {
   const { watch, t } = props
@@ -283,8 +313,9 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
         {watch.target}
       </span>
       <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-        {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })} · {cadence}
+        {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)} · {cadence}
       </span>
+      <CancelButton watch={watch} t={t} />
     </div>
   )
 }
@@ -502,8 +533,9 @@ export function SentinelBranch(
             {watch.target}
           </span>
           <span style={{ flex: 'none', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-            {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}
+            {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)}
           </span>
+          <CancelButton watch={watch} t={t} />
         </div>
       ))}
     </div>

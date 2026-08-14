@@ -13,6 +13,7 @@ function row(overrides: Partial<WatchRow> = {}): WatchRow {
     fireCount: 0,
     maxFires: 1,
     createdAt: '2026-01-01T00:00:00.000Z',
+    pendingWakeups: 0,
     ...overrides,
   }
 }
@@ -30,6 +31,21 @@ describe('dashboardHtml', () => {
     expect(html).toContain('watch-2')
     expect(html).toContain('0/1')
     expect(html).toContain('即时推送')
+  })
+
+  it('renders a manual cancel button and pending badge per row', () => {
+    const html = dashboardHtml([row({ pendingWakeups: 2 })])
+    expect(html).toContain('class="cancel"')
+    expect(html).toContain('data-id="watch-1"')
+    expect(html).toContain('<small class="pending">待投递 2</small>')
+    const quiet = dashboardHtml([row()])
+    expect(quiet).not.toContain('>待投递')
+  })
+
+  it('escapes the session id inside the cancel button attributes', () => {
+    const html = dashboardHtml([row({ sessionId: '"><img src=x onerror=alert(1)>' })])
+    expect(html).not.toContain('<img src=x')
+    expect(html).toContain('data-session="&quot;&gt;&lt;img')
   })
 
   it('escapes user-controlled fields so watch input cannot inject markup', () => {

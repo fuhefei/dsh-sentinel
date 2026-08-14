@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { apply, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
+import { apply, CANCEL_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
@@ -483,6 +483,101 @@ describe('sentinel end-to-end (in-process)', () => {
 
     // A session qualifier that matches nothing must not leak across sessions.
     expect(await post('id=watch-1&s=session-nobody', 'stray push')).toBe(404)
+  }, 10_000)
+
+  it('cancels manually through the route and surfaces pending wakeups', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never)
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({
+      kind: 'webhook',
+      target: 'ci-manual',
+      note: '手动取消验证',
+      max_fires: 3,
+      cooldown_seconds: 0,
+    }, {})
+
+    // The session goes dormant: the next fire cannot deliver and queues as pending.
+    harness.live.delete('session-e2e')
+    const hook = harness.routes.find(route => route.path === HOOK_PATH)
+    if (hook === undefined) throw new Error('hook route missing')
+    const fire = async (): Promise<number> => {
+      return new Promise(resolve => {
+        const endListeners: Array<() => void> = []
+        const dataListeners: Array<(chunk?: unknown) => void> = []
+        const req = {
+          url: `${HOOK_PATH}?id=watch-1&s=session-e2e`,
+          method: 'POST',
+          on(event: 'data' | 'end', callback: (chunk?: unknown) => void) {
+            if (event === 'data') dataListeners.push(callback)
+            else endListeners.push(callback as () => void)
+          },
+        }
+        let status = 0
+        const res = { writeHead(code: number) { status = code }, end() { resolve(status) } }
+        void hook.handler(req, res)
+        for (const listener of dataListeners) listener('push')
+        for (const listener of endListeners) listener()
+      })
+    }
+    expect(await fire()).toBe(200)
+    await sleep(200)
+
+    const stateRoute = harness.routes.find(route => route.path === STATE_PATH)
+    if (stateRoute === undefined) throw new Error('state route missing')
+    const readState = async (query: string): Promise<{ watches: Array<{ id: string; pendingWakeups?: number }> }> => {
+      return new Promise(resolve => {
+        const req = {
+          url: query === '' ? STATE_PATH : `${STATE_PATH}?${query}`,
+          method: 'GET',
+          on: (_event: string, _callback: (chunk?: unknown) => void) => {},
+        }
+        const res = {
+          writeHead: () => {},
+          end(body: string) { resolve(JSON.parse(body)) },
+        }
+        void stateRoute.handler(req, res)
+      })
+    }
+    const state = await readState('sessionId=session-e2e')
+    expect(state.watches).toHaveLength(1)
+    expect(state.watches[0]?.pendingWakeups).toBe(1)
+
+    const cancelRoute = harness.routes.find(route => route.path === CANCEL_PATH)
+    if (cancelRoute === undefined) throw new Error('cancel route missing')
+    const postCancel = async (query: string): Promise<{ status: number; body: string }> => {
+      return new Promise(resolve => {
+        const req = {
+          url: `${CANCEL_PATH}?${query}`,
+          method: 'POST',
+          on: (_event: string, _callback: (chunk?: unknown) => void) => {},
+        }
+        let status = 0
+        const res = {
+          writeHead(code: number) { status = code },
+          end(body: string) { resolve({ status, body }) },
+        }
+        void cancelRoute.handler(req, res)
+      })
+    }
+    expect((await postCancel('sessionId=session-e2e')).status).toBe(400)
+    expect((await postCancel('sessionId=session-e2e&id=watch-99')).status).toBe(404)
+    const cancelled = await postCancel('sessionId=session-e2e&id=watch-1')
+    expect(cancelled.status).toBe(200)
+    expect(cancelled.body).toContain('"cancelled":true')
+    await sleep(100)
+
+    expect((await readState('')).watches).toHaveLength(0)
+    const rows = (await storeLines()) as Array<{ sessionId: string; change: { change: string; reason?: string } }>
+    const cancelledRows = rows.filter(row => row.change.change === 'cancelled')
+    expect(cancelledRows).toHaveLength(1)
+    expect(cancelledRows[0]?.change.reason).toBe('user')
   }, 10_000)
 
   it('activates in a headless profile: no routes, but runtime and tools work', async () => {

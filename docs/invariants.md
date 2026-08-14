@@ -24,3 +24,9 @@ either broken once or is one edit away from breaking.
 6. **The sidecar log is the only carrier of truth.** Memory state is a fold of
    `sentinel.jsonl`; every mutation is an appended change, never an edit. A
    corrupt row fails the fold loudly.
+7. **Watches outlive their session's agent.** The host has no session-deleted
+   event, so watches of a deleted session keep probing until cancelled by
+   hand. Manual cancel (`POST /plugins/dsh-sentinel/cancel`, the ✕ in every
+   UI row) is the kill switch of last resort; never assume the agent is
+   reachable. The state route exposes `pendingWakeups` per watch so queued
+   wakeups are visible, not silent.

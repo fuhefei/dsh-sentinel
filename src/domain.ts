@@ -90,7 +90,7 @@ export type SentinelChange =
     readonly change: 'cancelled'
     readonly id: string
     readonly at: string
-    readonly reason: 'agent' | 'expired' | 'exhausted'
+    readonly reason: 'agent' | 'user' | 'expired' | 'exhausted'
   }
   | {
     readonly version: number
@@ -277,7 +277,7 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     const at = value['at']
     const reason = value['reason']
     if (typeof id !== 'string' || typeof at !== 'string'
-      || (reason !== 'agent' && reason !== 'expired' && reason !== 'exhausted')) {
+      || (reason !== 'agent' && reason !== 'user' && reason !== 'expired' && reason !== 'exhausted')) {
       throw new SentinelLogError('cancelled change must carry id, at, and a known reason')
     }
     return { version: SENTINEL_CHANGE_VERSION, change: 'cancelled', id, at, reason }

@@ -66,13 +66,14 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 - `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar branch (omit `sessionId` for every session).
 - `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
+- `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
 
 ## Install
 
 One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.8.3"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.8.2"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:
