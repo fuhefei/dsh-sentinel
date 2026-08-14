@@ -47,6 +47,7 @@ All deployment-tunable knobs live in the plugin's config schema (defaults in par
     maxPendingWakeups: 8         # queued wakeups per session before dropping oldest
     defaultIntervalSeconds: 30   # when a watch does not specify one (5–86400)
     defaultCooldownSeconds: 60
+    dutyLeaseTtlMs: 30000        # passive-instance takeover window after the owner dies
     notifyWebhookUrl: ''         # optional: POST every fire here as JSON
 ```
 

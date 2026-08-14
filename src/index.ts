@@ -18,6 +18,14 @@
  * table). Push route: POST /plugins/dsh-sentinel/hook?id=watch-N (webhooks).
  * The routes mount through dynamic `ctx.inject(['webServer'])`, so headless
  * profiles without a webServer service still load the runtime and tools.
+ *
+ * Durability: a duty lease (`$DSH_HOME/sentinel.lease`) keeps one probing
+ * owner per harness home — a second process stays passive, adopts nothing,
+ * and takes over within one lease TTL of the owner dying; the owner re-reads
+ * the sidecar each heartbeat so passive-created watches join the fold.
+ * Delivery is at-least-once: fires carry a `delivered` watermark, and a boot
+ * requeues everything logged past it. Fires optionally fan out to an external
+ * notify webhook (at-most-once, never blocks wakeup delivery).
  */
 import { watch as fsWatch, type FSWatcher } from 'node:fs'
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
@@ -409,7 +417,19 @@ class SentinelRuntime {
       }
     }
     void this.store.replaceAll(lines).then(
-      () => { this.warn(`sidecar compacted: ${String(totalRows)} rows -> ${String(lines.length)}`) },
+      () => {
+        this.warn(`sidecar compacted: ${String(totalRows)} rows -> ${String(lines.length)}`)
+        // Collapse the in-memory histories to the same compacted rows so
+        // later commits refold one row per subscription instead of the whole
+        // pre-compaction history (and store sync lengths line up again).
+        for (const watch of this.watches.values()) {
+          watch.rows = [...watch.folded.active.values()].map(sub => ({
+            type: SENTINEL_CHANGE_TYPE,
+            payload: { version: SENTINEL_CHANGE_VERSION, change: 'compacted', subscription: sub } as SentinelChange,
+          }))
+          this.refold(watch)
+        }
+      },
       (error: unknown) => { this.warn(`sidecar compaction failed (will retry next boot): ${describe(error)}`) },
     )
   }
@@ -712,6 +732,9 @@ class SentinelRuntime {
     watch.recentFires.unshift({ id: sub.id, at, summary: fact.summary })
     if (watch.recentFires.length > 20) watch.recentFires.pop()
     void this.notifyFire(watch, sub, fact)
+    // Only the duty owner queues in-memory wakeups; on a passive instance the
+    // queue would never drain — the owner requeues this fire from the log.
+    if (!this.duty) return
     watch.pendingWakeups.push(renderWakeup(sub, fact))
     if (watch.pendingWakeups.length > this.config.maxPendingWakeups) {
       const dropped = watch.pendingWakeups.length - this.config.maxPendingWakeups
