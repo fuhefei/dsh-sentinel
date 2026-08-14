@@ -53,6 +53,53 @@ describe('shouldFire', () => {
   })
 })
 
+describe('shouldFire properties (exhaustive over small domains)', () => {
+  const patterns = ['\\S', '[\\s\\S]+', '.', 'ready', 's', '^x', 'exit=2']
+  const placeholders = ['<absent>', '<unreachable>', '<none>', '<push-only>']
+  const contents = [
+    '', 'ready', 'x', 's', 'size=6 mtime=1\nhello\n', 'exit=2\nboom',
+    'status=200\n{"s":"ok"}', '<absent> but with a header line\n',
+  ]
+  const domain = [...placeholders, ...contents]
+  const fires = (pattern: string | undefined, a: string | undefined, b: string): boolean =>
+    shouldFire(pattern, a, b).fire
+
+  it('never fires twice in a row: an edge needs an intervening non-match', () => {
+    for (const pattern of patterns) {
+      for (const a of domain) {
+        for (const b of domain) {
+          if (!fires(pattern, a, b)) continue
+          for (const c of domain) {
+            if (fires(pattern, b, c)) {
+              throw new Error(`pattern /${pattern}/ fired on (${a})→(${b}) and (${b})→(${c})`)
+            }
+          }
+        }
+      }
+    }
+  })
+
+  it('treats every placeholder as a non-match under every pattern', () => {
+    for (const pattern of patterns) {
+      for (const placeholder of placeholders) {
+        for (const a of [undefined, ...domain]) {
+          if (fires(pattern, a, placeholder)) {
+            throw new Error(`pattern /${pattern}/ fired into placeholder ${placeholder}`)
+          }
+        }
+      }
+    }
+  })
+
+  it('holds on the baseline and fires only on change without a pattern', () => {
+    for (const a of [undefined, ...domain]) {
+      for (const b of domain) {
+        expect(fires(undefined, a, b)).toBe(a !== undefined && a !== b)
+      }
+    }
+  })
+})
+
 describe('probe', () => {
   const dirs: string[] = []
   afterAll(async () => {
