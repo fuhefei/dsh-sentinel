@@ -73,6 +73,8 @@ The patch declares `sidebar.workspaces.sessionRow` and `sidebar.workspaces.sessi
 
 When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed in the same profile, sentinel registers its global watch table as a sidebar tab (`dsh-sentinel:watches`, in the **+** menu) through better-sidebar's documented `ctx.betterSidebar.registerTab` extension surface: every watch server-wide with live probe state, fire budgets and recent fire history, fed by one shared poller. No configuration needed; without better-sidebar the registration is silently skipped and the dock / branch / dashboard keep working as before.
 
+![Sentinel tab inside the better-sidebar workbench](docs/preview/sentinel-better-sidebar-tab.png)
+
 ## Develop
 
 ```sh
