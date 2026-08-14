@@ -26,6 +26,7 @@ Two surfaces make the server-global watch set visible. A sidebar branch grows un
 | `command` | read-only shell line, probed on an interval | output/exit-code change |
 | `http` | URL probed on an interval | status/body change |
 | `process` | `pgrep -f` pattern, probed on an interval | match-set change |
+| `port` | TCP connect to `[host:]port`, probed on an interval | reachability change (open/closed/timeout) |
 | `webhook` | pure push | any POST to the returned hook URL |
 
 With `pattern`, probe kinds fire on the no-match→match edge of that regex and webhooks accept only matching payloads; without it, probe kinds fire on any change after the baseline.

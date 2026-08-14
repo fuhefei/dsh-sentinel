@@ -57,6 +57,8 @@ export const STATE_PATH = `/plugins/${PLUGIN_ID}/state`
 export const HOOK_PATH = `/plugins/${PLUGIN_ID}/hook`
 export const DASHBOARD_PATH = `/plugins/${PLUGIN_ID}/dashboard`
 const HEARTBEAT_MS = 5000
+/** Probes run concurrently up to this cap so one slow command/http target cannot stall the round. */
+const PROBE_CONCURRENCY = 8
 const PUSH_DEBOUNCE_MS = 250
 const MAX_PENDING_WAKEUPS = 8
 /** fsWatch arm failures back off this long before retrying (heartbeat polling covers the gap). */
@@ -288,6 +290,9 @@ class SentinelRuntime {
     for (const id of [...watch.probes.keys()]) {
       if (!watch.folded.active.has(id)) watch.probes.delete(id)
     }
+    for (const id of [...watch.watchFailures.keys()]) {
+      if (!watch.folded.active.has(id)) watch.watchFailures.delete(id)
+    }
     for (const [id, entry] of [...watch.watchers]) {
       if (!watch.folded.active.has(id)) {
         entry.watcher.close()
@@ -381,17 +386,27 @@ class SentinelRuntime {
     return true
   }
 
+  /**
+   * One heartbeat round: collect every due probe (and expiry cancel) across all
+   * sessions, then run them in bounded-concurrency batches. The `probing` flag
+   * keeps a re-entered round (push probe, create, previous round still in
+   * flight) from double-probing the same subscription; deliveries flush once
+   * after the batches settle.
+   */
   private async drive(): Promise<void> {
     if (this.disposed) return
+    const tasks: Array<() => Promise<void>> = []
+    const now = Date.now()
     for (const watch of [...this.watches.values()]) {
-      const now = Date.now()
       for (const sub of [...watch.folded.active.values()]) {
         if (sub.expiresAt !== undefined && Date.parse(sub.expiresAt) <= now) {
-          try {
-            await this.cancel(watch.sessionId, sub.id, 'expired')
-          } catch (error: unknown) {
-            this.warn(`expiry cancel failed for ${sub.id}: ${describe(error)}`)
-          }
+          tasks.push(async () => {
+            try {
+              await this.cancel(watch.sessionId, sub.id, 'expired')
+            } catch (error: unknown) {
+              this.warn(`expiry cancel failed for ${sub.id}: ${describe(error)}`)
+            }
+          })
           continue
         }
         if (sub.spec.kind === 'webhook') continue
@@ -400,16 +415,22 @@ class SentinelRuntime {
         if (sub.lastFiredAt !== undefined
           && now - Date.parse(sub.lastFiredAt) < sub.cooldownSeconds * 1000) continue
         state.probing = true
-        try {
-          await this.probeOne(watch, sub, state)
-        } finally {
-          state.probing = false
-          state.lastProbeAt = Date.now()
-          state.nextDueAt = Date.now() + sub.spec.intervalSeconds * 1000
-        }
+        tasks.push(async () => {
+          try {
+            await this.probeOne(watch, sub, state)
+          } finally {
+            state.probing = false
+            state.lastProbeAt = Date.now()
+            state.nextDueAt = Date.now() + sub.spec.intervalSeconds * 1000
+          }
+        })
       }
-      this.flushWakeups(watch)
     }
+    for (let index = 0; index < tasks.length; index += PROBE_CONCURRENCY) {
+      await Promise.allSettled(tasks.slice(index, index + PROBE_CONCURRENCY).map(task => task()))
+    }
+    if (this.disposed) return
+    for (const watch of [...this.watches.values()]) this.flushWakeups(watch)
   }
 
   /**
@@ -516,7 +537,11 @@ class SentinelRuntime {
     watch.recentFires.unshift({ id: sub.id, at, summary: fact.summary })
     if (watch.recentFires.length > 20) watch.recentFires.pop()
     watch.pendingWakeups.push(renderWakeup(sub, fact))
-    if (watch.pendingWakeups.length > MAX_PENDING_WAKEUPS) watch.pendingWakeups.shift()
+    if (watch.pendingWakeups.length > MAX_PENDING_WAKEUPS) {
+      const dropped = watch.pendingWakeups.length - MAX_PENDING_WAKEUPS
+      watch.pendingWakeups.splice(0, dropped)
+      this.warn(`pending wakeup overflow for "${watch.sessionId}": dropped ${String(dropped)} oldest (agent busy?)`)
+    }
   }
 
   private async probeOne(watch: SessionWatch, sub: Subscription, state: ProbeState): Promise<void> {
@@ -666,6 +691,8 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       ' active once a resident process (e.g. "dsh web") is running. Kinds: "file" (path snapshot; inotify push, reacts in under a',
       ' second), "command" (read-only shell line probed on an interval; fires on output/exit change),',
       ' "http" (URL status+body probed on an interval), "process" (pgrep pattern probed on an interval),',
+      ' "port" (TCP connect to "[host:]port" probed on an interval; fires on open/closed changes —',
+      ' good for "database is up", "dev server died"),',
       ' "webhook" (pure push: returns a hook URL, any external system can POST to it to wake you —',
       ' put a curl into a CI job, git hook, or another machine\'s script). With "pattern", probe kinds fire',
       ' on the no-match→match edge of that regex and webhooks fire only when the payload matches;',
@@ -675,13 +702,13 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       kind: {
         type: 'string',
         required: true,
-        enum: ['file', 'command', 'http', 'process', 'webhook'],
-        description: 'Sensor engine: probing (file/command/http/process) or pure push (webhook).',
+        enum: ['file', 'command', 'http', 'process', 'port', 'webhook'],
+        description: 'Sensor engine: probing (file/command/http/process/port) or pure push (webhook).',
       },
       target: {
         type: 'string',
         required: true,
-        description: 'file: absolute path; command: read-only shell line; http: URL; process: pgrep -f pattern; webhook: short label naming the expected caller.',
+        description: 'file: absolute path; command: read-only shell line; http: URL; process: pgrep -f pattern; port: "[host:]port"; webhook: short label naming the expected caller.',
       },
       pattern: {
         type: 'string',

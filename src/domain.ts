@@ -11,12 +11,12 @@ export const SENTINEL_CHANGE_TYPE = 'sentinel/change'
 export const SENTINEL_CHANGE_VERSION = 1
 
 /** Probe engines the runtime knows how to drive. `webhook` is push-only: no probing, external callers POST to the hook route. */
-export type SensorKind = 'file' | 'command' | 'http' | 'process' | 'webhook'
+export type SensorKind = 'file' | 'command' | 'http' | 'process' | 'port' | 'webhook'
 
 /** What the agent asked to watch, all data, no code. */
 export interface SensorSpec {
   readonly kind: SensorKind
-  /** file: absolute path; command: shell line; http: URL; process: pgrep pattern; webhook: human label for the expected caller. */
+  /** file: absolute path; command: shell line; http: URL; process: pgrep pattern; port: "[host:]port"; webhook: human label for the expected caller. */
   readonly target: string
   /** Optional regex (source string). Probe kinds: fire on no-match → match transitions. webhook: fire only when the posted payload matches. */
   readonly pattern?: string
@@ -144,7 +144,7 @@ function decodeObserved(value: unknown): KnownSnapshot {
   return { state: value['state'], snapshot: value['snapshot'] }
 }
 
-const SENSOR_KINDS: readonly SensorKind[] = ['file', 'command', 'http', 'process', 'webhook']
+const SENSOR_KINDS: readonly SensorKind[] = ['file', 'command', 'http', 'process', 'port', 'webhook']
 
 export const MIN_INTERVAL_SECONDS = 5
 export const MAX_INTERVAL_SECONDS = 86_400
@@ -162,6 +162,13 @@ export function normalizeSpec(value: unknown): SensorSpec {
   const target = value['target']
   if (typeof target !== 'string' || target.trim() === '') {
     throw new SentinelLogError('sensor target must be a non-empty string')
+  }
+  if (kind === 'port') {
+    const match = /^(?:([^:\s]+):)?(\d{1,5})$/.exec(target.trim())
+    const port = match === null ? Number.NaN : Number(match[2])
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new SentinelLogError('port target must be "[host:]port" with a port in 1-65535')
+    }
   }
   const pattern = value['pattern']
   if (pattern !== undefined) {

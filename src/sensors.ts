@@ -8,6 +8,7 @@
  * already had permission to run interactively when it registered the watch.
  */
 import { exec, execFile } from 'node:child_process'
+import { connect } from 'node:net'
 import { open, stat } from 'node:fs/promises'
 import type { SensorSpec } from './domain.ts'
 
@@ -62,14 +63,27 @@ function probeCommand(target: string): Promise<ProbeResult> {
   })
 }
 
-/** GET the URL; snapshot = status + body head. Network failure is a state. */
+/** GET the URL; snapshot = status + body head, streamed so a huge body never lands whole in memory. Network failure is a state. */
 async function probeHttp(target: string): Promise<ProbeResult> {
   const controller = new AbortController()
   const timer = setTimeout(() => { controller.abort() }, PROBE_TIMEOUT_MS)
   try {
     const response = await fetch(target, { signal: controller.signal, redirect: 'manual' })
-    const body = await response.text()
-    const head = body.length > SNAPSHOT_TAIL_BYTES ? body.slice(0, SNAPSHOT_TAIL_BYTES) : body
+    let head = ''
+    const reader = response.body?.getReader()
+    if (reader !== undefined) {
+      const decoder = new TextDecoder()
+      while (head.length < SNAPSHOT_TAIL_BYTES) {
+        const { done, value } = await reader.read()
+        if (done) break
+        head += decoder.decode(value, { stream: true })
+      }
+      // Enough bytes collected (or the loop exited early): release the connection.
+      void reader.cancel().catch(() => {})
+    } else {
+      head = await response.text()
+    }
+    if (head.length > SNAPSHOT_TAIL_BYTES) head = head.slice(0, SNAPSHOT_TAIL_BYTES)
     return {
       snapshot: `status=${String(response.status)}\n${head}`,
       state: `HTTP ${String(response.status)}`,
@@ -98,6 +112,26 @@ function probeProcess(target: string): Promise<ProbeResult> {
   })
 }
 
+/** TCP-connect to host:port; the snapshot is the open/closed/timeout word, so the generic diff fires on any reachability change. */
+function probePort(target: string): Promise<ProbeResult> {
+  const match = /^(?:([^:\s]+):)?(\d{1,5})$/.exec(target.trim())
+  const host = match?.[1] ?? 'localhost'
+  const port = Number(match?.[2])
+  return new Promise(resolve => {
+    let settled = false
+    const socket = connect({ host, port })
+    const settle = (word: string): void => {
+      if (settled) return
+      settled = true
+      socket.destroy()
+      resolve({ snapshot: word, state: `${word} (${host}:${String(port)})` })
+    }
+    socket.setTimeout(PROBE_TIMEOUT_MS, () => { settle('timeout') })
+    socket.on('connect', () => { settle('open') })
+    socket.on('error', () => { settle('closed') })
+  })
+}
+
 /** Dispatch one probe for a spec. Never throws: every failure mode is a state. */
 export function probe(spec: SensorSpec): Promise<ProbeResult> {
   switch (spec.kind) {
@@ -105,6 +139,7 @@ export function probe(spec: SensorSpec): Promise<ProbeResult> {
     case 'command': return probeCommand(spec.target)
     case 'http': return probeHttp(spec.target)
     case 'process': return probeProcess(spec.target)
+    case 'port': return probePort(spec.target)
     case 'webhook': return Promise.resolve({ snapshot: '<push-only>', state: 'awaiting push' })
   }
 }

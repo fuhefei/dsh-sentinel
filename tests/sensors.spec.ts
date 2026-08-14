@@ -1,4 +1,5 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -63,6 +64,20 @@ describe('probe', () => {
     const result = await probe({ kind: 'process', target: "definitely-no-such-proc'; echo pwned", intervalSeconds: 5 })
     expect(result.snapshot).not.toContain('pwned')
     expect(result.state).toBe('no process')
+  })
+
+  it('reports port reachability as a state', async () => {
+    const server = createServer(socket => { socket.end() })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = server.address() as { port: number }
+    const target = `127.0.0.1:${String(port)}`
+    const open = await probe({ kind: 'port', target, intervalSeconds: 5 })
+    expect(open.state).toContain('open')
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    const closed = await probe({ kind: 'port', target, intervalSeconds: 5 })
+    expect(closed.state).toContain('closed')
+    const bare = await probe({ kind: 'port', target: String(port), intervalSeconds: 5 })
+    expect(bare.snapshot).toBe(closed.snapshot)
   })
 
   it('snapshots only the tail of a large file', async () => {

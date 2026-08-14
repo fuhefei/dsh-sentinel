@@ -74,6 +74,12 @@ describe('normalizeSpec', () => {
     expect(() => normalizeSpec({ kind: 'file', target: '  ' })).toThrow(SentinelLogError)
     expect(() => normalizeSpec({ kind: 'file', target: '/a', pattern: '(' })).toThrow(SentinelLogError)
   })
+
+  it('validates port targets and trims them', () => {
+    expect(normalizeSpec({ kind: 'port', target: ' db.internal:5432 ' }).target).toBe('db.internal:5432')
+    expect(() => normalizeSpec({ kind: 'port', target: '70000' })).toThrow(SentinelLogError)
+    expect(() => normalizeSpec({ kind: 'port', target: 'not a port' })).toThrow(SentinelLogError)
+  })
 })
 
 describe('foldSentinelEvents', () => {
