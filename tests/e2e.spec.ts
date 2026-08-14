@@ -6,7 +6,7 @@ import { apply, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
-function makeHarness(resumable: string[] = []) {
+function makeHarness(resumable: string[] = [], options: { headless?: boolean } = {}) {
   const followups: string[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const tools: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
@@ -57,7 +57,7 @@ function makeHarness(resumable: string[] = []) {
   live.set(agent.id, agent)
 
   const routes: Array<{ path: string; handler: (req: unknown, res: unknown) => void }> = []
-  const rootCtx = {
+  const rootCtx: Record<string, unknown> = {
     ...makeCtx(),
     agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat' }) },
     agents: {
@@ -72,12 +72,19 @@ function makeHarness(resumable: string[] = []) {
         return { agent: resumed, dispose: () => { live.delete(resumeSessionId) } }
       },
     },
-    webServer: {
+  }
+  if (options.headless !== true) {
+    rootCtx['webServer'] = {
       register(route: { path: string; handler: (req: unknown, res: unknown) => void }) {
         routes.push(route)
         return () => {}
       },
-    },
+    }
+  }
+  // Cordis dynamic-injection double: fires only when the service exists.
+  rootCtx['inject'] = (_deps: string[], callback: (ctx: unknown) => void) => {
+    if (options.headless !== true) callback(rootCtx)
+    return () => {}
   }
 
   return { agent, followups, tools, routes, cleanups, rootCtx, live, resumeCalls, emit }
@@ -370,4 +377,28 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(harness.followups.length).toBe(1)
     expect(harness.followups[0]).toContain('status=success build=42')
   }, 10_000)
+
+  it('activates in a headless profile: no routes, but runtime and tools work', async () => {
+    await freshHome()
+    const harness = makeHarness([], { headless: true })
+    harnesses.push(harness)
+    apply(harness.rootCtx as never)
+    expect(harness.routes.length).toBe(0)
+
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    const created = await watchTool.execute({
+      kind: 'process',
+      target: 'definitely-not-running-proc',
+      note: 'headless smoke',
+      max_fires: 1,
+    }, {}) as { id: string }
+    expect(created.id).toBe('watch-1')
+
+    const listTool = harness.tools.find(tool => tool.name === 'sentinel_list')
+    if (listTool === undefined) throw new Error('list tool missing')
+    const listed = await listTool.execute({}, {}) as { subscriptions: Array<{ id: string }> }
+    expect(listed.subscriptions.map(sub => sub.id)).toContain('watch-1')
+  })
 })

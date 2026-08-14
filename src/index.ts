@@ -16,6 +16,8 @@
  * Read-only routes: /plugins/dsh-sentinel/state (browser dock and sidebar
  * branch render it) and /plugins/dsh-sentinel/dashboard (server-global watch
  * table). Push route: POST /plugins/dsh-sentinel/hook?id=watch-N (webhooks).
+ * The routes mount through dynamic `ctx.inject(['webServer'])`, so headless
+ * profiles without a webServer service still load the runtime and tools.
  */
 import { watch as fsWatch, type FSWatcher } from 'node:fs'
 import { stat } from 'node:fs/promises'
@@ -46,7 +48,9 @@ import { probe, shouldFire } from './sensors.ts'
 import { SentinelStore, type FoldableRow } from './store.ts'
 
 export const name = 'dsh-sentinel'
-export const inject = ['agents', 'agentDefaultModel', 'tools', 'webServer']
+// webServer is deliberately absent: headless profiles have no web server, and
+// the routes below mount through ctx.inject(['webServer']) instead.
+export const inject = ['agents', 'agentDefaultModel', 'tools']
 
 const PLUGIN_ID = 'dsh-sentinel'
 export const STATE_PATH = `/plugins/${PLUGIN_ID}/state`
@@ -77,6 +81,9 @@ interface AgentLike {
 interface ContextLike {
   effect(body: () => (() => void | Promise<void>) | Promise<() => void>, label?: string): () => void | Promise<void>
   on(event: string, callback: (...args: never[]) => void): () => void
+  /** Cordis dynamic injection: runs the callback once every listed service is
+   * published; never runs (and does not block activation) when one is absent. */
+  inject(deps: string[], callback: (ctx: ContextLike) => void): () => void
   readonly logger: { warn(message: string): void }
   readonly agents: {
     roots(): AgentLike[]
@@ -87,7 +94,7 @@ interface ContextLike {
     currentSelection(): { provider: string; model: string }
   }
   readonly tools: { register(definition: unknown): () => void }
-  readonly webServer: {
+  readonly webServer?: {
     register(route: {
       kind: 'exact'
       path: string
@@ -920,77 +927,101 @@ setInterval(refresh, 3000)
 `
 }
 
+type WebServerLike = NonNullable<ContextLike['webServer']>
+
+/**
+ * HTTP surface: state JSON (dock / branch / tab poll it), dashboard table,
+ * webhook push. Mounted only when the host publishes webServer; headless
+ * profiles run the runtime and tools without it.
+ */
+function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: WebServerLike): () => void {
+  const stopRoute = webServer.register({
+    kind: 'exact',
+    path: STATE_PATH,
+    handler: (req, res) => {
+      try {
+        const url = new URL(req.url ?? '/', 'http://dsh.internal')
+        const sessionId = url.searchParams.get('sessionId') ?? ''
+        const rows: unknown[] = collectWatchRows(runtime, ctx, sessionId)
+        const fires: unknown[] = []
+        for (const [id, watch] of runtime.view()) {
+          if (sessionId !== '' && id !== sessionId) continue
+          fires.push(...watch.recentFires.map(fire => ({ sessionId: id, ...fire })))
+        }
+        res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ watches: rows, recentFires: fires }))
+      } catch (error: unknown) {
+        res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify({ error: describe(error) }))
+      }
+    },
+  })
+
+  const stopDashboard = webServer.register({
+    kind: 'exact',
+    path: DASHBOARD_PATH,
+    handler: (_req, res) => {
+      try {
+        res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        res.end(dashboardHtml(collectWatchRows(runtime, ctx, '')))
+      } catch (error: unknown) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(describe(error))
+      }
+    },
+  })
+
+  const stopHook = webServer.register({
+    kind: 'exact',
+    path: HOOK_PATH,
+    handler: (req, res) => {
+      const respond = (status: number, body: Record<string, unknown>): void => {
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+        res.end(JSON.stringify(body))
+      }
+      if ((req.method ?? 'GET') !== 'POST') {
+        respond(405, { fired: false, reason: 'POST only' })
+        return
+      }
+      const url = new URL(req.url ?? '/', 'http://dsh.internal')
+      const id = url.searchParams.get('id') ?? ''
+      let payload = ''
+      req.on('data', chunk => {
+        if (payload.length < 65_536) payload += String(chunk)
+      })
+      req.on('end', () => {
+        const watch = runtime.findByWatchId(id)
+        if (watch === undefined) {
+          respond(404, { fired: false, reason: 'no such webhook watch' })
+          return
+        }
+        void runtime.handleWebhook(watch, id, payload).then(
+          outcome => { respond(outcome.status, outcome.body) },
+          (error: unknown) => { respond(500, { fired: false, reason: describe(error) }) },
+        )
+      })
+    },
+  })
+
+  return () => {
+    stopRoute()
+    stopDashboard()
+    stopHook()
+  }
+}
+
 export function apply(ctx: ContextLike): void {
   ctx.effect(() => {
     const runtime = new SentinelRuntime(ctx, new SentinelStore(storePath()))
     let stopping = false
 
-    const stopRoute = ctx.webServer.register({
-      kind: 'exact',
-      path: STATE_PATH,
-      handler: (req, res) => {
-        try {
-          const url = new URL(req.url ?? '/', 'http://dsh.internal')
-          const sessionId = url.searchParams.get('sessionId') ?? ''
-          const rows: unknown[] = collectWatchRows(runtime, ctx, sessionId)
-          const fires: unknown[] = []
-          for (const [id, watch] of runtime.view()) {
-            if (sessionId !== '' && id !== sessionId) continue
-            fires.push(...watch.recentFires.map(fire => ({ sessionId: id, ...fire })))
-          }
-          res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ watches: rows, recentFires: fires }))
-        } catch (error: unknown) {
-          res.writeHead(500, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify({ error: describe(error) }))
-        }
-      },
-    })
-
-    const stopDashboard = ctx.webServer.register({
-      kind: 'exact',
-      path: DASHBOARD_PATH,
-      handler: (_req, res) => {
-        try {
-          res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(dashboardHtml(collectWatchRows(runtime, ctx, '')))
-        } catch (error: unknown) {
-          res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
-          res.end(describe(error))
-        }
-      },
-    })
-
-    const stopHook = ctx.webServer.register({
-      kind: 'exact',
-      path: HOOK_PATH,
-      handler: (req, res) => {
-        const respond = (status: number, body: Record<string, unknown>): void => {
-          res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
-          res.end(JSON.stringify(body))
-        }
-        if ((req.method ?? 'GET') !== 'POST') {
-          respond(405, { fired: false, reason: 'POST only' })
-          return
-        }
-        const url = new URL(req.url ?? '/', 'http://dsh.internal')
-        const id = url.searchParams.get('id') ?? ''
-        let payload = ''
-        req.on('data', chunk => {
-          if (payload.length < 65_536) payload += String(chunk)
-        })
-        req.on('end', () => {
-          const watch = runtime.findByWatchId(id)
-          if (watch === undefined) {
-            respond(404, { fired: false, reason: 'no such webhook watch' })
-            return
-          }
-          void runtime.handleWebhook(watch, id, payload).then(
-            outcome => { respond(outcome.status, outcome.body) },
-            (error: unknown) => { respond(500, { fired: false, reason: describe(error) }) },
-          )
-        })
-      },
+    // Routes are web-profile-only: dynamic injection keeps headless profiles
+    // (no webServer service) from stalling on a pending dependency.
+    const stopRoutes = ctx.inject(['webServer'], (sctx) => {
+      sctx.effect(() => {
+        const webServer = sctx.webServer
+        return webServer === undefined ? () => {} : registerRoutes(runtime, ctx, webServer)
+      }, `${PLUGIN_ID}.routes()`)
     })
 
     const attached = new WeakSet<AgentLike>()
@@ -1016,9 +1047,7 @@ export function apply(ctx: ContextLike): void {
 
     return () => {
       stopping = true
-      stopRoute()
-      stopDashboard()
-      stopHook()
+      stopRoutes()
       stopCreated()
       runtime.dispose()
     }
