@@ -614,29 +614,22 @@ export function apply(ctx: Context): void {
   // Soft integration with dsh-better-sidebar. betterSidebar stays out of the
   // static inject — a missing service would leave this plugin pending and take
   // the whole web boot down on hosts without better-sidebar. The tab mounts
-  // eagerly when the service is already up (bundle order), and otherwise on
-  // the cordis service-landing event (fiber-scoped listener, self-cleaning).
-  let tabMounted = false
-  const mountSidebarTab = (sidebar: BetterSidebarLike): void => {
-    if (tabMounted) return
-    tabMounted = true
-    ctx.effect(() => sidebar.registerTab({
-      id: 'dsh-sentinel:watches',
-      title: () => (navigator.language.startsWith('zh') ? zh : en)['tab'],
-      icon: (size: number) => <Icon name="eye" size={Math.max(12, size - 2)} />,
-      order: 60,
-      single: true,
-      component: () => <SentinelTabView />,
-    }), 'sentinel: better-sidebar tab')
-  }
-  const sidebarNow = (ctx as unknown as { betterSidebar?: BetterSidebarLike }).betterSidebar
-  if (sidebarNow !== undefined) {
-    mountSidebarTab(sidebarNow)
-  } else {
-    ;(ctx as unknown as { on: (event: string, callback: (...args: never[]) => void) => () => void }).on('internal/service', ((name: string) => {
-      if (name !== 'betterSidebar') return
-      const sidebar = (ctx as unknown as { betterSidebar?: BetterSidebarLike }).betterSidebar
-      if (sidebar !== undefined) mountSidebarTab(sidebar)
-    }) as never)
-  }
+  // through a child fiber with its own injection instead (the cordis dynamic
+  // pattern): it activates whenever the service lands and never blocks us.
+  void (ctx as unknown as {
+    plugin: (plugin: { inject: string[]; apply: (pluginCtx: Context) => void }) => unknown
+  }).plugin({
+    inject: ['betterSidebar'],
+    apply(sidebarCtx) {
+      const sidebar = (sidebarCtx as unknown as { betterSidebar: BetterSidebarLike }).betterSidebar
+      ctx.effect(() => sidebar.registerTab({
+        id: 'dsh-sentinel:watches',
+        title: () => (navigator.language.startsWith('zh') ? zh : en)['tab'],
+        icon: (size: number) => <Icon name="eye" size={Math.max(12, size - 2)} />,
+        order: 60,
+        single: true,
+        component: () => <SentinelTabView />,
+      }), 'sentinel: better-sidebar tab')
+    },
+  })
 }
