@@ -95,6 +95,8 @@ interface ContextLike {
   }
   readonly tools: { register(definition: unknown): () => void }
   readonly webServer?: {
+    /** Listening port (OS-assigned value when the config port is 0). */
+    readonly port: number
     register(route: {
       kind: 'exact'
       path: string
@@ -172,6 +174,14 @@ class SentinelRuntime {
     // handles; subscriptions survive either way through the sidecar log.
     this.timer.unref()
     void this.loadPersisted()
+  }
+
+  /** Absolute webhook URL when the web server port is known; bare path in
+   * headless (no webServer), where nothing listens anyway. */
+  hookUrl(id: string): string {
+    const port = this.ctx.webServer?.port
+    const path = `${HOOK_PATH}?id=${id}`
+    return port === undefined ? path : `http://localhost:${String(port)}${path}`
   }
 
   dispose(): void {
@@ -703,7 +713,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       schema: WATCH_OUTPUT_SCHEMA,
       render: (_args: unknown, value: { id: string; kind: string; target: string; intervalSeconds: number; hookPath?: string }) =>
         textBlock(value.hookPath !== undefined
-          ? `哨兵订阅 ${value.id} 已注册: webhook · ${value.target}\n推送地址: POST ${value.hookPath}（需常驻 dsh 进程监听该地址；一次性 headless 进程退出后无法接收推送）`
+          ? `哨兵订阅 ${value.id} 已注册: webhook · ${value.target}\n推送地址: POST ${value.hookPath}${value.hookPath.startsWith('http') ? '（localhost 指 dsh 所在主机，跨机器调用请换成该主机的可达地址）' : ''}——需常驻 dsh 进程监听该地址，一次性 headless 进程退出后无法接收推送`
           : `哨兵订阅 ${value.id} 已注册: ${value.kind} · ${value.target}（每 ${String(value.intervalSeconds)}s 探测${value.kind === 'file' ? '，文件变化即时推送' : ''}；会话休眠时由服务端值守；探测与触发投递由常驻 dsh 进程承担——一次性 headless 进程退出后，需有常驻进程（如 dsh web）运行才会生效）`),
     },
     async execute(args: {
@@ -743,7 +753,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
         maxFires: subscription.maxFires,
         note: subscription.note,
         ...(subscription.spec.kind === 'webhook'
-          ? { hookPath: `${HOOK_PATH}?id=${subscription.id}` }
+          ? { hookPath: runtime.hookUrl(subscription.id) }
           : {}),
       }
     },

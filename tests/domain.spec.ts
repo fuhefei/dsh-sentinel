@@ -219,7 +219,8 @@ describe('renderWakeup', () => {
     expect(body).toContain('watch-3')
     expect(body).toContain('第 1/2 次')
     expect(body).toContain('服务挂了先看 journalctl 再重启')
-    expect(body).toContain('剩余 1 次')
+    expect(body).toContain("剩余 1 次")
+    expect(body).toContain("sentinel_cancel")
   })
 
   it('marks the final fire as terminal', () => {

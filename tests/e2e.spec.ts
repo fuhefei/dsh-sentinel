@@ -75,6 +75,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
   }
   if (options.headless !== true) {
     rootCtx['webServer'] = {
+      port: 3080,
       register(route: { path: string; handler: (req: unknown, res: unknown) => void }) {
         routes.push(route)
         return () => {}
@@ -339,7 +340,7 @@ describe('sentinel end-to-end (in-process)', () => {
       max_fires: 2,
       cooldown_seconds: 0,
     }, {}) as { hookPath?: string }
-    expect(created.hookPath).toBe(`${HOOK_PATH}?id=watch-1`)
+    expect(created.hookPath).toBe(`http://localhost:3080${HOOK_PATH}?id=watch-1`)
 
     const hook = harness.routes.find(route => route.path === HOOK_PATH)
     if (hook === undefined) throw new Error('hook route missing')

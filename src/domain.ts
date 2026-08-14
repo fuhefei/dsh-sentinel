@@ -403,7 +403,7 @@ export function renderWakeup(sub: Subscription, fact: FireFact): string {
     '',
     fact.fireNumber >= sub.maxFires
       ? '这是最后一次触发，该订阅已自动结束。'
-      : `剩余 ${String(sub.maxFires - fact.fireNumber)} 次触发额度；如果不再需要，用 sentinel 工具 cancel("${sub.id}")。`,
+      : `剩余 ${String(sub.maxFires - fact.fireNumber)} 次触发额度；如果不再需要，用 sentinel_cancel 工具取消（id: "${sub.id}"）。`,
   ]
   return lines.filter((line): line is string => line !== undefined).join('\n')
 }

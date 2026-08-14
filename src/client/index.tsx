@@ -440,7 +440,7 @@ export function SentinelTabView(): ReactNode {
       {watches.map(watch => (
         <div key={`${watch.sessionId}-${watch.id}`}>
           <div style={{ padding: '4px 12px 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
-            {watch.sessionId}{watch.live ? '' : ` · ${t('dormant')}`}
+            {watch.sessionId} · {watch.live ? t('live') : t('dormant')}
           </div>
           <WatchRow watch={watch} t={t} />
         </div>
