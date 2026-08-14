@@ -588,8 +588,10 @@ export function SentinelTabView(): ReactNode {
 }
 
 /** Required client services: slot registry and locale dictionaries. betterSidebar
- * is declared but optional — absent when better-sidebar is not installed. */
-export const inject = ['slots', 'locale', 'betterSidebar']
+ * stays out of the static inject — on hosts without better-sidebar a missing
+ * service would leave this plugin pending and take the whole web boot down.
+ * The tab mounts via an eager check plus the service-landing event instead. */
+export const inject = ['slots', 'locale']
 
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'sentinel: dictionaries')
@@ -609,10 +611,15 @@ export function apply(ctx: Context): void {
       id: 'sentinel',
       locale: NS,
     }, SentinelBranch))
-  // Soft integration with dsh-better-sidebar: register the global watch table
-  // as a sidebar tab when its service is published; silently skip otherwise.
-  if (ctx.betterSidebar !== undefined) {
-    const sidebar = ctx.betterSidebar
+  // Soft integration with dsh-better-sidebar. betterSidebar stays out of the
+  // static inject — a missing service would leave this plugin pending and take
+  // the whole web boot down on hosts without better-sidebar. The tab mounts
+  // eagerly when the service is already up (bundle order), and otherwise on
+  // the cordis service-landing event (fiber-scoped listener, self-cleaning).
+  let tabMounted = false
+  const mountSidebarTab = (sidebar: BetterSidebarLike): void => {
+    if (tabMounted) return
+    tabMounted = true
     ctx.effect(() => sidebar.registerTab({
       id: 'dsh-sentinel:watches',
       title: () => (navigator.language.startsWith('zh') ? zh : en)['tab'],
@@ -621,5 +628,15 @@ export function apply(ctx: Context): void {
       single: true,
       component: () => <SentinelTabView />,
     }), 'sentinel: better-sidebar tab')
+  }
+  const sidebarNow = (ctx as unknown as { betterSidebar?: BetterSidebarLike }).betterSidebar
+  if (sidebarNow !== undefined) {
+    mountSidebarTab(sidebarNow)
+  } else {
+    ;(ctx as unknown as { on: (event: string, callback: (...args: never[]) => void) => () => void }).on('internal/service', ((name: string) => {
+      if (name !== 'betterSidebar') return
+      const sidebar = (ctx as unknown as { betterSidebar?: BetterSidebarLike }).betterSidebar
+      if (sidebar !== undefined) mountSidebarTab(sidebar)
+    }) as never)
   }
 }
