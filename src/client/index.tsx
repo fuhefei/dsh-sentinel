@@ -27,6 +27,36 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
+// Optional soft dependency on dsh-better-sidebar (omdsh-dev): its client half
+// publishes ctx.betterSidebar, a documented third-party extension surface
+// (registerTab / registerFileViewer). We restate the minimal contract here
+// instead of value-importing the package, so sentinel builds and loads whether
+// or not better-sidebar is installed; the tab registration below no-ops when
+// the service is absent.
+interface SentinelTabProps {
+  readonly visible: boolean
+}
+
+interface SentinelTabDescriptor {
+  readonly id: string
+  readonly title: string | (() => string)
+  readonly icon?: ReactNode | ((size: number) => ReactNode)
+  readonly order?: number
+  readonly single?: boolean
+  readonly component: (props: SentinelTabProps) => ReactNode
+}
+
+interface BetterSidebarLike {
+  registerTab(descriptor: SentinelTabDescriptor): () => void
+}
+
+declare module 'cordis' {
+  interface Context {
+    /** Present only when dsh-better-sidebar's client half is loaded. */
+    readonly betterSidebar?: BetterSidebarLike
+  }
+}
+
 const STATE_PATH = '/plugins/dsh-sentinel/state'
 const DASHBOARD_PATH = '/plugins/dsh-sentinel/dashboard'
 const POLL_MS = 2000
@@ -47,6 +77,8 @@ const zh = {
   'dashboard': '全局总览 ↗',
   'dormant': '休眠',
   'live': '活跃',
+  'tab': '哨兵监控',
+  'tabempty': '当前没有活跃的监控。',
 } satisfies Record<string, string>
 type SentinelKey = keyof typeof zh
 const en = {
@@ -64,6 +96,8 @@ const en = {
   'dashboard': 'All watches ↗',
   'dormant': 'dormant',
   'live': 'live',
+  'tab': 'Sentinel',
+  'tabempty': 'No active watches right now.',
 } satisfies Record<string, string>
 
 const SIDE_CLEARANCE = 'var(--dsh-composer-side-clearance, 16px)'
@@ -125,6 +159,7 @@ function useSentinelState(sessionId: string): WireState {
 // unfiltered state-route poll with reference-counted start/stop, so N watched
 // session rows cost one request per tick, not N.
 let globalWatches: readonly WireWatch[] = []
+let globalFires: readonly WireFire[] = []
 const globalListeners = new Set<() => void>()
 let globalTimer: ReturnType<typeof setInterval> | undefined
 
@@ -135,6 +170,7 @@ async function pollGlobal(): Promise<void> {
     const data = (await res.json()) as Partial<WireState>
     if (Array.isArray(data.watches)) {
       globalWatches = data.watches
+      globalFires = Array.isArray(data.recentFires) ? data.recentFires : []
       for (const listener of globalListeners) listener()
     }
   } catch {
@@ -162,6 +198,13 @@ function useGlobalWatches(): readonly WireWatch[] {
   const [, force] = useState(0)
   useEffect(() => subscribeGlobal(() => { force(n => n + 1) }), [])
   return globalWatches
+}
+
+/** Subscribe to the server-global recent-fire list (same shared poller). */
+function useGlobalFires(): readonly WireFire[] {
+  const [, force] = useState(0)
+  useEffect(() => subscribeGlobal(() => { force(n => n + 1) }), [])
+  return globalFires
 }
 
 const KIND_GLYPHS: Record<string, string> = {
@@ -350,8 +393,88 @@ export function SentinelBranch(
   )
 }
 
-/** Required client services: slot registry and locale dictionaries. */
-export const inject = ['slots', 'locale']
+/**
+ * better-sidebar tab view: the server-global watch table inside the sidebar
+ * workbench. better-sidebar's tab contract passes no locale props, so copy
+ * falls back to the browser language (their documented guidance for consumer
+ * tabs is plain strings / () => string).
+ */
+export function SentinelTabView(): ReactNode {
+  const watches = useGlobalWatches()
+  const fires = useGlobalFires()
+  const t = (key: SentinelKey, values?: Record<string, unknown>): string => {
+    const template = (navigator.language.startsWith('zh') ? zh : en)[key]
+    if (values === undefined) return template
+    return template.replace(/\{(\w+)\}/g, (match, name: string) =>
+      values[name] !== undefined ? String(values[name]) : match)
+  }
+
+  return (
+    <div
+      data-sentinel-tab=""
+      style={{
+        height: '100%', overflowY: 'auto', padding: '8px 0',
+        fontSize: 13, fontFamily: 'system-ui', color: 'var(--dsw-alias-label-primary-dimmed)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 12px 6px' }}>
+        <StateDot state="ongoing" size={10} />
+        <span style={{ fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>{t('tab')}</span>
+        <span style={{ flex: 1, fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
+          {t('count', { count: watches.length })}
+        </span>
+        <a
+          href={DASHBOARD_PATH}
+          target="_blank"
+          rel="noreferrer"
+          style={{ flex: 'none', fontSize: 11, color: 'var(--dsw-alias-label-caption)', textDecoration: 'none' }}
+        >
+          {t('dashboard')}
+        </a>
+      </div>
+      {watches.length === 0 && (
+        <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
+          {t('tabempty')}
+        </div>
+      )}
+      {watches.map(watch => (
+        <div key={`${watch.sessionId}-${watch.id}`}>
+          <div style={{ padding: '4px 12px 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+            {watch.sessionId}{watch.live ? '' : ` · ${t('dormant')}`}
+          </div>
+          <WatchRow watch={watch} t={t} />
+        </div>
+      ))}
+      {watches.length > 0 && (
+        <div style={{ padding: '8px 12px 2px', fontSize: 11, fontWeight: 500, color: 'var(--dsw-alias-label-caption)' }}>
+          {t('history')}
+        </div>
+      )}
+      {fires.length === 0
+        ? watches.length > 0 && (
+          <div style={{ padding: '0 12px 4px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
+            {t('nofires')}
+          </div>
+        )
+        : fires.slice(0, 12).map(fire => (
+          <div
+            key={`${fire.sessionId}-${fire.id}-${fire.at}`}
+            style={{ display: 'flex', gap: 8, padding: '1px 12px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}
+          >
+            <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>{new Date(fire.at).toLocaleTimeString()}</span>
+            <span style={{ flex: 'none' }}>{fire.id}</span>
+            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {fire.summary}
+            </span>
+          </div>
+        ))}
+    </div>
+  )
+}
+
+/** Required client services: slot registry and locale dictionaries. betterSidebar
+ * is declared but optional — absent when better-sidebar is not installed. */
+export const inject = ['slots', 'locale', 'betterSidebar']
 
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'sentinel: dictionaries')
@@ -371,4 +494,19 @@ export function apply(ctx: Context): void {
       id: 'sentinel',
       locale: NS,
     }, SentinelBranch))
+  // Soft integration with dsh-better-sidebar: register the global watch table
+  // as a sidebar tab when its service is published; silently skip otherwise.
+  if (ctx.betterSidebar !== undefined) {
+    const sidebar = ctx.betterSidebar
+    ctx.effect(() => sidebar.registerTab({
+      id: 'dsh-sentinel:watches',
+      title: () => (navigator.language.startsWith('zh') ? zh : en)['tab'],
+      icon: (size: number) => (
+        <span aria-hidden style={{ fontSize: Math.max(12, size - 2), lineHeight: 1 }}>👁</span>
+      ),
+      order: 60,
+      single: true,
+      component: () => <SentinelTabView />,
+    }), 'sentinel: better-sidebar tab')
+  }
 }
