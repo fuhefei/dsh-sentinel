@@ -1,6 +1,6 @@
 {
   "name": "@dsh-external/dsh-sentinel",
-  "version": "0.4.0",
+  "version": "0.3.0",
   "license": "BSD-3-Clause",
   "description": "DSH 哨兵：条件驱动的 agent 唤醒系统——文件/进程/端口/命令传感器，订阅存为会话事件，重启自动复活；每个订阅、每次触发对用户完全可见",
   "type": "module",
@@ -41,6 +41,7 @@
   "devDependencies": {
     "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
     "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
     "@types/node": "^24.13.3",
     "@types/react": "~18.3.1",
     "lightningcss": "^1.25.0",

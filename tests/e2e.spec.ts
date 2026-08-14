@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
-import { apply, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
+import { apply, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
@@ -401,5 +401,18 @@ describe('sentinel end-to-end (in-process)', () => {
     if (listTool === undefined) throw new Error('list tool missing')
     const listed = await listTool.execute({}, {}) as { subscriptions: Array<{ id: string }> }
     expect(listed.subscriptions.map(sub => sub.id)).toContain('watch-1')
+  })
+
+  it('honors a tighter maxSubscriptionsPerSession from config', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, maxSubscriptionsPerSession: 1 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({ kind: 'process', target: 'first-proc', note: 'config smoke', max_fires: 1 }, {})
+    await expect(watchTool.execute({ kind: 'process', target: 'second-proc', note: 'over the cap', max_fires: 1 }, {}))
+      .rejects.toThrow('subscription limit reached (1)')
   })
 })

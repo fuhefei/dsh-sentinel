@@ -31,6 +31,24 @@ Two surfaces make the server-global watch set visible. A sidebar branch grows un
 
 With `pattern`, probe kinds fire on the no-match→match edge of that regex and webhooks accept only matching payloads; without it, probe kinds fire on any change after the baseline.
 
+## Configuration
+
+All deployment-tunable knobs live in the plugin's config schema (defaults in parentheses); override them on the bundle row in your profile's `cordis.patch.yml`:
+
+```yaml
+- id: dsh-sentinel
+  name: '@dsh-external/dsh-sentinel'
+  config:
+    heartbeatMs: 5000            # probe round interval
+    probeConcurrency: 8          # in-flight probes per round
+    maxSubscriptionsPerSession: 16
+    maxPendingWakeups: 8         # queued wakeups per session before dropping oldest
+    defaultIntervalSeconds: 30   # when a watch does not specify one (5–86400)
+    defaultCooldownSeconds: 60
+```
+
+Invalid values fail plugin load with a schema error rather than misbehaving at runtime.
+
 ## Tools
 
 - `sentinel_watch` — register a watch: `kind`, `target`, optional `pattern`, `interval` (1–3600s, default 30), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `ttl`.

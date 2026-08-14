@@ -148,6 +148,8 @@ const SENSOR_KINDS: readonly SensorKind[] = ['file', 'command', 'http', 'process
 
 export const MIN_INTERVAL_SECONDS = 5
 export const MAX_INTERVAL_SECONDS = 86_400
+export const DEFAULT_INTERVAL_SECONDS = 30
+export const DEFAULT_COOLDOWN_SECONDS = 60
 export const MAX_SUBSCRIPTIONS_PER_AGENT = 16
 export const MAX_NOTE_LENGTH = 2000
 export const MAX_EXCERPT_LENGTH = 640
@@ -182,7 +184,7 @@ export function normalizeSpec(value: unknown): SensorSpec {
   const rawInterval = value['intervalSeconds']
   const interval = typeof rawInterval === 'number' && Number.isFinite(rawInterval)
     ? Math.round(rawInterval)
-    : 30
+    : DEFAULT_INTERVAL_SECONDS
   const clamped = Math.min(MAX_INTERVAL_SECONDS, Math.max(MIN_INTERVAL_SECONDS, interval))
   return {
     kind: kind as SensorKind,

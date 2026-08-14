@@ -23,11 +23,14 @@ import { watch as fsWatch, type FSWatcher } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
+import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
   allocateWatchId,
   clipExcerpt,
+  DEFAULT_COOLDOWN_SECONDS,
+  DEFAULT_INTERVAL_SECONDS,
   foldSentinelEvents,
   MAX_NOTE_LENGTH,
   MAX_SUBSCRIPTIONS_PER_AGENT,
@@ -52,15 +55,49 @@ export const name = 'dsh-sentinel'
 // the routes below mount through ctx.inject(['webServer']) instead.
 export const inject = ['agents', 'agentDefaultModel', 'tools']
 
+/**
+ * Deployment-tunable knobs (the no-hardcoded-parameters convention): every
+ * field must be changeable from the profile's cordis.patch.yml without
+ * touching code. DEFAULT_CONFIG is the single source the schema defaults cite.
+ */
+export interface Config {
+  /** Heartbeat interval driving all probe rounds (ms). */
+  heartbeatMs: number
+  /** Upper bound on concurrently in-flight probes per heartbeat round. */
+  probeConcurrency: number
+  /** Active watches allowed per session. */
+  maxSubscriptionsPerSession: number
+  /** Queued wakeups kept per session before the oldest drop (with a warning). */
+  maxPendingWakeups: number
+  /** Probe interval used when a watch does not specify one (seconds). */
+  defaultIntervalSeconds: number
+  /** Cooldown used when a watch does not specify one (seconds). */
+  defaultCooldownSeconds: number
+}
+
+export const DEFAULT_CONFIG: Config = {
+  heartbeatMs: 5000,
+  probeConcurrency: 8,
+  maxSubscriptionsPerSession: MAX_SUBSCRIPTIONS_PER_AGENT,
+  maxPendingWakeups: 8,
+  defaultIntervalSeconds: DEFAULT_INTERVAL_SECONDS,
+  defaultCooldownSeconds: DEFAULT_COOLDOWN_SECONDS,
+}
+
+export const Config: Schema<Config> = Schema.object({
+  heartbeatMs: Schema.number().default(DEFAULT_CONFIG.heartbeatMs).description('Heartbeat interval driving all probe rounds (ms).'),
+  probeConcurrency: Schema.number().default(DEFAULT_CONFIG.probeConcurrency).description('Upper bound on concurrently in-flight probes per heartbeat round.'),
+  maxSubscriptionsPerSession: Schema.number().default(DEFAULT_CONFIG.maxSubscriptionsPerSession).description('Active watches allowed per session.'),
+  maxPendingWakeups: Schema.number().default(DEFAULT_CONFIG.maxPendingWakeups).description('Queued wakeups kept per session before the oldest drop (with a warning).'),
+  defaultIntervalSeconds: Schema.number().default(DEFAULT_CONFIG.defaultIntervalSeconds).description(`Probe interval used when a watch does not specify one (seconds, clamped to ${String(MIN_INTERVAL_SECONDS)}–${String(MAX_INTERVAL_SECONDS)}).`),
+  defaultCooldownSeconds: Schema.number().default(DEFAULT_CONFIG.defaultCooldownSeconds).description('Cooldown used when a watch does not specify one (seconds).'),
+})
+
 const PLUGIN_ID = 'dsh-sentinel'
 export const STATE_PATH = `/plugins/${PLUGIN_ID}/state`
 export const HOOK_PATH = `/plugins/${PLUGIN_ID}/hook`
 export const DASHBOARD_PATH = `/plugins/${PLUGIN_ID}/dashboard`
-const HEARTBEAT_MS = 5000
-/** Probes run concurrently up to this cap so one slow command/http target cannot stall the round. */
-const PROBE_CONCURRENCY = 8
 const PUSH_DEBOUNCE_MS = 250
-const MAX_PENDING_WAKEUPS = 8
 /** fsWatch arm failures back off this long before retrying (heartbeat polling covers the gap). */
 const FILE_WATCH_RETRY_MS = 60_000
 /** Compact the sidecar at boot when rows exceed active subscriptions by this margin. */
@@ -167,10 +204,11 @@ class SentinelRuntime {
   constructor(
     private readonly ctx: ContextLike,
     private readonly store: SentinelStore,
+    readonly config: Config,
   ) {}
 
   start(): void {
-    this.timer = setInterval(() => { void this.drive() }, HEARTBEAT_MS)
+    this.timer = setInterval(() => { void this.drive() }, this.config.heartbeatMs)
     // Headless profiles exit when the prompt completes: the heartbeat must not
     // hold the event loop open there. Web mode stays up on the server's own
     // handles; subscriptions survive either way through the sidecar log.
@@ -347,8 +385,8 @@ class SentinelRuntime {
   async create(sessionId: string, spec: unknown, note: string, maxFires: number, cooldownSeconds: number, expiresInSeconds?: number): Promise<Subscription> {
     const normalized = normalizeSpec(spec)
     const watch = this.watchOf(sessionId)
-    if (watch.folded.active.size >= MAX_SUBSCRIPTIONS_PER_AGENT) {
-      throw new SentinelLogError(`subscription limit reached (${String(MAX_SUBSCRIPTIONS_PER_AGENT)}); cancel one first`)
+    if (watch.folded.active.size >= this.config.maxSubscriptionsPerSession) {
+      throw new SentinelLogError(`subscription limit reached (${String(this.config.maxSubscriptionsPerSession)}); cancel one first`)
     }
     const id = allocateWatchId(watch.folded)
     const createdAt = new Date().toISOString()
@@ -426,8 +464,8 @@ class SentinelRuntime {
         })
       }
     }
-    for (let index = 0; index < tasks.length; index += PROBE_CONCURRENCY) {
-      await Promise.allSettled(tasks.slice(index, index + PROBE_CONCURRENCY).map(task => task()))
+    for (let index = 0; index < tasks.length; index += this.config.probeConcurrency) {
+      await Promise.allSettled(tasks.slice(index, index + this.config.probeConcurrency).map(task => task()))
     }
     if (this.disposed) return
     for (const watch of [...this.watches.values()]) this.flushWakeups(watch)
@@ -537,8 +575,8 @@ class SentinelRuntime {
     watch.recentFires.unshift({ id: sub.id, at, summary: fact.summary })
     if (watch.recentFires.length > 20) watch.recentFires.pop()
     watch.pendingWakeups.push(renderWakeup(sub, fact))
-    if (watch.pendingWakeups.length > MAX_PENDING_WAKEUPS) {
-      const dropped = watch.pendingWakeups.length - MAX_PENDING_WAKEUPS
+    if (watch.pendingWakeups.length > this.config.maxPendingWakeups) {
+      const dropped = watch.pendingWakeups.length - this.config.maxPendingWakeups
       watch.pendingWakeups.splice(0, dropped)
       this.warn(`pending wakeup overflow for "${watch.sessionId}": dropped ${String(dropped)} oldest (agent busy?)`)
     }
@@ -757,15 +795,15 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       if (note === '') throw new SentinelLogError('note must not be empty — tell your future self why this watch exists')
       if (note.length > MAX_NOTE_LENGTH) throw new SentinelLogError(`note too long (${String(note.length)} > ${String(MAX_NOTE_LENGTH)})`)
       const maxFires = args.max_fires !== undefined ? Math.max(1, Math.round(args.max_fires)) : 1
-      const cooldown = args.cooldown_seconds !== undefined ? Math.max(0, Math.round(args.cooldown_seconds)) : 60
-      const expires = args.expires_in_seconds !== undefined ? Math.max(HEARTBEAT_MS / 1000, Math.round(args.expires_in_seconds)) : undefined
+      const cooldown = args.cooldown_seconds !== undefined ? Math.max(0, Math.round(args.cooldown_seconds)) : runtime.config.defaultCooldownSeconds
+      const expires = args.expires_in_seconds !== undefined ? Math.max(runtime.config.heartbeatMs / 1000, Math.round(args.expires_in_seconds)) : undefined
       const subscription = await runtime.create(
         agent.id,
         {
           kind: args.kind,
           target: args.target,
           ...(args.pattern !== undefined ? { pattern: args.pattern } : {}),
-          intervalSeconds: args.interval_seconds ?? 30,
+          intervalSeconds: args.interval_seconds ?? runtime.config.defaultIntervalSeconds,
         },
         note,
         maxFires,
@@ -1053,9 +1091,9 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
   }
 }
 
-export function apply(ctx: ContextLike): void {
+export function apply(ctx: ContextLike, config: Config = DEFAULT_CONFIG): void {
   ctx.effect(() => {
-    const runtime = new SentinelRuntime(ctx, new SentinelStore(storePath()))
+    const runtime = new SentinelRuntime(ctx, new SentinelStore(storePath()), config)
     let stopping = false
 
     // Routes are web-profile-only: dynamic injection keeps headless profiles
