@@ -68,7 +68,7 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#main"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.6.0"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:
@@ -97,6 +97,10 @@ The patch declares `sidebar.workspaces.sessionRow` and `sidebar.workspaces.sessi
 When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed in the same profile, sentinel registers its global watch table as a sidebar tab (`dsh-sentinel:watches`, in the **+** menu) through better-sidebar's documented `ctx.betterSidebar.registerTab` extension surface: every watch server-wide with live probe state, fire budgets and recent fire history, fed by one shared poller. No configuration needed; without better-sidebar the registration is silently skipped and the dock / branch / dashboard keep working as before.
 
 ![Sentinel tab inside the better-sidebar workbench](docs/preview/sentinel-better-sidebar-tab.png)
+
+### Plays well with
+
+Install [dsh-notification](https://github.com/omdsh-dev/dsh-notification) alongside sentinel and the whole wakeup loop reaches your desktop: sentinel wakes the agent, the agent works the turn, and the turn's completion fires a desktop notification — no integration needed, the two plugins compose on their own.
 
 ## Develop
 
