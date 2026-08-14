@@ -345,17 +345,17 @@ describe('sentinel end-to-end (in-process)', () => {
       max_fires: 2,
       cooldown_seconds: 0,
     }, {}) as { hookPath?: string }
-    expect(created.hookPath).toBe(`http://localhost:3080${HOOK_PATH}?id=watch-1`)
+    expect(created.hookPath).toBe(`http://localhost:3080${HOOK_PATH}?id=watch-1&s=session-e2e`)
 
     const hook = harness.routes.find(route => route.path === HOOK_PATH)
     if (hook === undefined) throw new Error('hook route missing')
 
-    const call = async (payload: string): Promise<{ status: number; body: string }> => {
+    const call = async (payload: string, query = 'id=watch-1&s=session-e2e'): Promise<{ status: number; body: string }> => {
       return new Promise(resolve => {
         const dataListeners: Array<(chunk?: unknown) => void> = []
         const endListeners: Array<() => void> = []
         const req = {
-          url: `${HOOK_PATH}?id=watch-1`,
+          url: `${HOOK_PATH}?${query}`,
           method: 'POST',
           on(event: 'data' | 'end', callback: (chunk?: unknown) => void) {
             if (event === 'data') dataListeners.push(callback)
@@ -382,6 +382,107 @@ describe('sentinel end-to-end (in-process)', () => {
 
     expect(harness.followups.length).toBe(1)
     expect(harness.followups[0]).toContain('status=success build=42')
+  }, 10_000)
+
+  it('scopes webhook hook URLs per session: identical watch ids never cross-fire', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never)
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+
+    const toolA = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (toolA === undefined) throw new Error('watch tool missing')
+    const createdA = await toolA.execute({
+      kind: 'webhook',
+      target: 'ci-a',
+      note: 'A 的钩子',
+      max_fires: 3,
+      cooldown_seconds: 0,
+    }, {}) as { id: string; hookPath?: string }
+    expect(createdA.hookPath).toContain('s=session-e2e')
+
+    // Second live session in the same runtime: its watch counter also starts at watch-1.
+    const followupsB: string[] = []
+    const agentB = {
+      id: 'session-b',
+      status: 'idle',
+      followup(message: unknown) {
+        const blocks = (message as { content?: Array<{ text?: string }> }).content ?? []
+        followupsB.push(blocks.map(block => block.text ?? '').join(''))
+      },
+      ctx: {
+        effect(body: () => () => void) {
+          const cleanup = body()
+          harness.cleanups.push(cleanup)
+          return cleanup
+        },
+        on: () => () => {},
+        tools: {
+          register(definition: unknown) {
+            ;(harness.tools as unknown[]).push(definition)
+            return () => {}
+          },
+        },
+      },
+    }
+    harness.live.set('session-b', agentB as never)
+    harness.emit('agent/created', { agent: agentB })
+    const watchTools = harness.tools.filter(tool => tool.name === 'sentinel_watch')
+    const toolB = watchTools[watchTools.length - 1]
+    if (toolB === undefined) throw new Error('second watch tool missing')
+    const createdB = await toolB.execute({
+      kind: 'webhook',
+      target: 'ci-b',
+      note: 'B 的钩子',
+      max_fires: 3,
+      cooldown_seconds: 0,
+    }, {}) as { id: string; hookPath?: string }
+    expect(createdB.id).toBe('watch-1')
+    expect(createdB.hookPath).toContain('s=session-b')
+
+    const hook = harness.routes.find(route => route.path === HOOK_PATH)
+    if (hook === undefined) throw new Error('hook route missing')
+    const post = async (query: string, payload: string): Promise<number> => {
+      return new Promise(resolve => {
+        const dataListeners: Array<(chunk?: unknown) => void> = []
+        const endListeners: Array<() => void> = []
+        const req = {
+          url: `${HOOK_PATH}?${query}`,
+          method: 'POST',
+          on(event: 'data' | 'end', callback: (chunk?: unknown) => void) {
+            if (event === 'data') dataListeners.push(callback)
+            else endListeners.push(callback as () => void)
+          },
+        }
+        let status = 0
+        const res = {
+          writeHead(code: number) { status = code },
+          end() { resolve(status) },
+        }
+        void hook.handler(req, res)
+        for (const listener of dataListeners) listener(payload)
+        for (const listener of endListeners) listener()
+      })
+    }
+
+    // Session-qualified push wakes only B, never A.
+    expect(await post('id=watch-1&s=session-b', 'push for b')).toBe(200)
+    await sleep(150)
+    expect(harness.followups.length).toBe(0)
+    expect(followupsB.length).toBe(1)
+    expect(followupsB[0]).toContain('B 的钩子')
+
+    // Qualifier-less URLs (baked into external systems before the fix) still
+    // resolve deterministically to the first matching webhook watch: A.
+    expect(await post('id=watch-1', 'legacy push for a')).toBe(200)
+    await sleep(150)
+    expect(harness.followups.length).toBe(1)
+    expect(harness.followups[0]).toContain('A 的钩子')
+
+    // A session qualifier that matches nothing must not leak across sessions.
+    expect(await post('id=watch-1&s=session-nobody', 'stray push')).toBe(404)
   }, 10_000)
 
   it('activates in a headless profile: no routes, but runtime and tools work', async () => {

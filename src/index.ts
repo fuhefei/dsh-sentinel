@@ -320,10 +320,11 @@ class SentinelRuntime {
   }
 
   /** Absolute webhook URL when the web server port is known; bare path in
-   * headless (no webServer), where nothing listens anyway. */
-  hookUrl(id: string): string {
+   * headless (no webServer), where nothing listens anyway. The session
+   * qualifier disambiguates watch ids, which are allocated per session. */
+  hookUrl(sessionId: string, id: string): string {
     const port = this.ctx.webServer?.port
-    const path = `${HOOK_PATH}?id=${id}`
+    const path = `${HOOK_PATH}?id=${id}&s=${encodeURIComponent(sessionId)}`
     return port === undefined ? path : `http://localhost:${String(port)}${path}`
   }
 
@@ -454,9 +455,18 @@ class SentinelRuntime {
     return this.watches
   }
 
-  findByWatchId(id: string): SessionWatch | undefined {
+  /** Resolve the session for an inbound webhook push. Watch ids are only
+   * unique per session, so the URL's session qualifier decides; URLs baked
+   * into external systems before the qualifier existed fall back to the
+   * first matching webhook watch. */
+  resolveWebhookTarget(sessionId: string | null, id: string): SessionWatch | undefined {
+    if (sessionId !== null && sessionId !== '') {
+      const watch = this.watches.get(sessionId)
+      return watch !== undefined && watch.folded.active.has(id) ? watch : undefined
+    }
     for (const watch of this.watches.values()) {
-      if (watch.folded.active.has(id)) return watch
+      const sub = watch.folded.active.get(id)
+      if (sub !== undefined && sub.spec.kind === 'webhook') return watch
     }
     return undefined
   }
@@ -1030,7 +1040,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
         maxFires: subscription.maxFires,
         note: subscription.note,
         ...(subscription.spec.kind === 'webhook'
-          ? { hookPath: runtime.hookUrl(subscription.id) }
+          ? { hookPath: runtime.hookUrl(agent.id, subscription.id) }
           : {}),
       }
     },
@@ -1323,7 +1333,7 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
         if (payload.length < 65_536) payload += String(chunk)
       })
       req.on('end', () => {
-        const watch = runtime.findByWatchId(id)
+        const watch = runtime.resolveWebhookTarget(url.searchParams.get('s'), id)
         if (watch === undefined) {
           respond(404, { fired: false, reason: 'no such webhook watch' })
           return
