@@ -195,6 +195,11 @@ interface FireRecord {
   readonly id: string
   readonly at: string
   readonly summary: string
+  /** Subscription note at fire time — the wakeup context, shown by the UI. */
+  readonly note: string
+  /** Clipped snapshot excerpts, shown as the before → after transition. */
+  readonly before: string
+  readonly after: string
 }
 
 /** All sentinel state for one session; lives as long as the server, not the agent. */
@@ -729,7 +734,7 @@ class SentinelRuntime {
       fact,
       ...(observed !== undefined ? { observed } : {}),
     })
-    watch.recentFires.unshift({ id: sub.id, at, summary: fact.summary })
+    watch.recentFires.unshift({ id: sub.id, at, summary: fact.summary, note: sub.note, before: fact.before, after: fact.after })
     if (watch.recentFires.length > 20) watch.recentFires.pop()
     void this.notifyFire(watch, sub, fact)
     // Only the duty owner queues in-memory wakeups; on a passive instance the
@@ -1189,15 +1194,25 @@ export function dashboardHtml(rows: readonly WatchRow[]): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sentinel 全局总览</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 24px; color: #1f2329; }
+  :root {
+    --s-bg: #ffffff; --s-fg: #1f2329; --s-muted: #86909c;
+    --s-border: #e5e6eb; --s-code: #f2f3f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --s-bg: #17181c; --s-fg: #e3e4e8; --s-muted: #8a8f99;
+      --s-border: #33353c; --s-code: #24262c;
+    }
+  }
+  body { font-family: system-ui, sans-serif; margin: 24px; color: var(--s-fg); background: var(--s-bg); }
   h1 { font-size: 16px; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { border-bottom: 1px solid #e5e6eb; padding: 6px 10px; text-align: left; vertical-align: top; }
-  th { color: #86909c; font-weight: 500; white-space: nowrap; }
+  th, td { border-bottom: 1px solid var(--s-border); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { color: var(--s-muted); font-weight: 500; white-space: nowrap; }
   td.target { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  td.empty { color: #86909c; text-align: center; padding: 24px; }
-  code { background: #f2f3f5; padding: 1px 4px; border-radius: 4px; }
-  small { color: #86909c; }
+  td.empty { color: var(--s-muted); text-align: center; padding: 24px; }
+  code { background: var(--s-code); padding: 1px 4px; border-radius: 4px; }
+  small { color: var(--s-muted); }
 </style>
 </head>
 <body>

@@ -69,11 +69,13 @@ const zh = {
   'next': '下次探测 {s}s',
   'probing': '探测中',
   'push': '即时推送',
-  'open': '展开',
-  'close': '收起',
   'history': '最近触发',
   'nofires': '尚未触发过',
-  'branch': '👁 哨兵 · {count} 个监控',
+  'branch': '哨兵 · {count} 个监控',
+  'noteLabel': '便签',
+  'before': '之前',
+  'after': '现在',
+  'emptyHint': '让 agent 用 sentinel_watch 注册第一个监控。',
   'dashboard': '全局总览 ↗',
   'dormant': '休眠',
   'live': '活跃',
@@ -88,11 +90,13 @@ const en = {
   'next': 'next probe {s}s',
   'probing': 'probing',
   'push': 'live push',
-  'open': 'Expand',
-  'close': 'Collapse',
   'history': 'Recent fires',
   'nofires': 'No fires yet',
-  'branch': '👁 sentinel · {count} watch(es)',
+  'branch': 'sentinel · {count} watch(es)',
+  'noteLabel': 'note',
+  'before': 'before',
+  'after': 'after',
+  'emptyHint': 'Ask the agent to register a watch with sentinel_watch.',
   'dashboard': 'All watches ↗',
   'dormant': 'dormant',
   'live': 'live',
@@ -125,6 +129,9 @@ interface WireFire {
   id: string
   at: string
   summary: string
+  note: string
+  before: string
+  after: string
 }
 
 interface WireState {
@@ -207,12 +214,46 @@ function useGlobalFires(): readonly WireFire[] {
   return globalFires
 }
 
-const KIND_GLYPHS: Record<string, string> = {
-  file: '▤',
-  command: '❯',
-  http: '⇄',
-  process: '▶',
-  webhook: '⚡',
+/** Single-color inline icons (currentColor): one visual language across the
+ * dock, branch, tab and every platform — no emoji rendering drift. */
+const ICON_PATHS = {
+  eye: ['M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z', 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z'],
+  file: ['M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z', 'M14 2v6h6'],
+  command: ['M4 17l6-6-6-6', 'M12 19h8'],
+  http: ['M8 3 4 7l4 4', 'M4 7h16', 'M16 21l4-4-4-4', 'M20 17H4'],
+  process: ['M6 4l14 8-14 8Z'],
+  port: ['M9 2v6', 'M15 2v6', 'M6 8h12v4a6 6 0 0 1-12 0Z', 'M12 18v4'],
+  webhook: ['M13 2 3 14h7l-1 8 10-12h-7Z'],
+  chevron: ['M6 9l6 6 6-6'],
+} as const
+
+function Icon(props: { name: keyof typeof ICON_PATHS; size?: number }): ReactNode {
+  const { name, size = 14 } = props
+  return (
+    <svg
+      aria-hidden
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flex: 'none', display: 'block' }}
+    >
+      {ICON_PATHS[name].map(path => <path key={path} d={path} />)}
+    </svg>
+  )
+}
+
+const KIND_ICONS: Record<string, keyof typeof ICON_PATHS> = {
+  file: 'file',
+  command: 'command',
+  http: 'http',
+  process: 'process',
+  port: 'port',
+  webhook: 'webhook',
 }
 
 function countdown(nextDueAt: number | undefined): string {
@@ -228,8 +269,8 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
     : `${t('next', { s: countdown(watch.nextDueAt) })}${watch.kind === 'file' ? ` · ${t('push')}` : ''}`
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '2px 12px', minHeight: 24 }}>
-      <span style={{ flex: 'none', width: 14, textAlign: 'center', fontSize: 12, color: 'var(--dsw-alias-label-tertiary)' }}>
-        {KIND_GLYPHS[watch.kind] ?? '•'}
+      <span style={{ flex: 'none', display: 'inline-flex', width: 16, justifyContent: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>
+        <Icon name={KIND_ICONS[watch.kind] ?? 'file'} size={13} />
       </span>
       <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)', whiteSpace: 'nowrap' }}>{watch.id}</span>
       <span
@@ -241,9 +282,68 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
       >
         {watch.target}
       </span>
-      <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)', whiteSpace: 'nowrap' }}>
+      <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
         {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })} · {cadence}
       </span>
+    </div>
+  )
+}
+
+/**
+ * One fire in the history list: a single receipt line, expandable into the
+ * full wakeup context — the note the user left for themselves plus the
+ * before → after snapshot transition (the transparency this plugin promises).
+ */
+function FireRow(props: { fire: WireFire; t: (key: SentinelKey, values?: Record<string, unknown>) => string }): ReactNode {
+  const { fire, t } = props
+  const [open, setOpen] = useState(false)
+  const [hover, setHover] = useState(false)
+  return (
+    <div style={{ borderRadius: 6 }}>
+      <div
+        onClick={() => { setOpen(value => !value) }}
+        onMouseEnter={() => { setHover(true) }}
+        onMouseLeave={() => { setHover(false) }}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, padding: '2px 12px', fontSize: 12,
+          color: 'var(--dsw-alias-label-caption)', cursor: 'pointer', borderRadius: 6,
+          background: hover ? 'var(--dsw-alias-fill-secondary, rgba(127,127,127,.08))' : 'transparent',
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        <span
+          style={{ flex: 'none', display: 'inline-flex', color: 'var(--dsw-alias-label-tertiary)', transition: 'transform .15s ease', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+        >
+          <Icon name="chevron" size={11} />
+        </span>
+        <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>{new Date(fire.at).toLocaleTimeString()}</span>
+        <span style={{ flex: 'none' }}>{fire.id}</span>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fire.summary}</span>
+      </div>
+      {open && (
+        <div style={{ padding: '2px 12px 6px 30px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
+          <div style={{ marginBottom: 4 }}>
+            <span style={{ fontWeight: 500 }}>{t('noteLabel')}</span>
+            {'：'}
+            {fire.note}
+          </div>
+          <div style={{ display: 'flex', alignItems: 'stretch', gap: 8 }}>
+            <pre style={{ flex: 1, margin: 0, padding: '4px 6px', borderRadius: 6, overflow: 'auto', maxHeight: 120, fontSize: 11, lineHeight: '16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--dsw-alias-fill-secondary, rgba(127,127,127,.08))' }}>
+              {t('before')}
+              {'\n'}
+              {fire.before === '' ? '—' : fire.before}
+            </pre>
+            <span style={{ flex: 'none', alignSelf: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>
+              <Icon name="chevron" size={12} />
+            </span>
+            <pre style={{ flex: 1, margin: 0, padding: '4px 6px', borderRadius: 6, overflow: 'auto', maxHeight: 120, fontSize: 11, lineHeight: '16px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', background: 'var(--dsw-alias-fill-secondary, rgba(127,127,127,.08))' }}>
+              {t('after')}
+              {'\n'}
+              {fire.after}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -289,46 +389,58 @@ export function SentinelDock(
         style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '6px 12px', cursor: 'pointer' }}
         onClick={() => { setOpen(value => !value) }}
       >
-        <span style={{ display: 'inline-flex', flex: 'none', alignItems: 'center', gap: 8 }}>
+        <span style={{ display: 'inline-flex', flex: 'none', alignItems: 'center', gap: 8, color: 'var(--dsw-alias-label-primary)' }}>
           <StateDot state="ongoing" size={10} />
-          <span aria-hidden style={{ fontSize: 13, lineHeight: '16px' }}>👁</span>
+          <Icon name="eye" size={14} />
         </span>
         <span style={{ flex: 'none', fontSize: 13, lineHeight: '24px', fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
           {t('watching')}
         </span>
-        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', fontSize: 12, color: 'var(--dsw-alias-label-caption)', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', fontSize: 12, color: 'var(--dsw-alias-label-caption)', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
           {t('count', { count: watches.length })}
           {' · '}
           {watches.map(watch => watch.id).join(' ')}
         </span>
-        <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
-          {open ? t('close') : t('open')}
+        <a
+          href={DASHBOARD_PATH}
+          target="_blank"
+          rel="noreferrer"
+          onClick={(e) => { e.stopPropagation() }}
+          style={{ flex: 'none', fontSize: 11, color: 'var(--dsw-alias-label-caption)', textDecoration: 'none' }}
+        >
+          {t('dashboard')}
+        </a>
+        <span
+          style={{ flex: 'none', display: 'inline-flex', color: 'var(--dsw-alias-label-caption)', transition: 'transform .2s ease', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}
+        >
+          <Icon name="chevron" size={13} />
         </span>
       </div>
-      {open && (
-        <div style={{ maxHeight: 220, overflowY: 'auto', borderTop: '1px solid var(--dsw-alias-border-l1)', padding: '4px 0' }}>
+      <div
+        style={{
+          maxHeight: open ? 260 : 0, opacity: open ? 1 : 0,
+          overflowY: open ? 'auto' : 'hidden', overflowX: 'hidden',
+          borderTop: open ? '1px solid var(--dsw-alias-border-l1)' : '1px solid transparent',
+          transition: 'max-height .2s ease, opacity .15s ease',
+        }}
+      >
+        <div style={{ padding: '4px 0' }}>
           {watches.map(watch => <WatchRow key={watch.id} watch={watch} t={t} />)}
           <div style={{ padding: '4px 12px 2px', fontSize: 11, fontWeight: 500, color: 'var(--dsw-alias-label-caption)' }}>
             {t('history')}
           </div>
           {recentFires.length === 0
             ? <div style={{ padding: '0 12px 4px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>{t('nofires')}</div>
-            : recentFires.slice(0, 8).map(fire => (
-              <div key={`${fire.id}-${fire.at}`} style={{ display: 'flex', gap: 10, padding: '1px 12px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
-                <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>{new Date(fire.at).toLocaleTimeString()}</span>
-                <span style={{ flex: 'none' }}>{fire.id}</span>
-                <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fire.summary}</span>
-              </div>
-            ))}
+            : recentFires.slice(0, 8).map(fire => <FireRow key={`${fire.id}-${fire.at}`} fire={fire} t={t} />)}
         </div>
-      )}
+      </div>
     </div>
   )
 }
 
 /**
  * Row-below sidebar branch: one instance per session row, fed by the shared
- * global poller. Collapsed it is a single 👁 row with the watch count;
+ * global poller. Collapsed it is a single eye-iconed row with the watch count;
  * expanded it lists this session's watches and links to the dashboard table.
  * Renders nothing when the session has no watches, so unwatched rows are
  * untouched.
@@ -358,9 +470,14 @@ export function SentinelBranch(
         style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer' }}
         onClick={(e) => { e.stopPropagation(); setOpen(value => !value) }}
       >
-        <span aria-hidden style={{ fontSize: 10 }}>{open ? '▾' : '▸'}</span>
+        <span style={{ flex: 'none', display: 'inline-flex', color: 'var(--dsw-alias-label-tertiary)', transition: 'transform .15s ease', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}>
+          <Icon name="chevron" size={10} />
+        </span>
         <StateDot state="ongoing" size={8} />
-        <span>{t('branch', { count: mine.length })}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+          <Icon name="eye" size={11} />
+          {t('branch', { count: mine.length })}
+        </span>
         <a
           href={DASHBOARD_PATH}
           target="_blank"
@@ -377,14 +494,14 @@ export function SentinelBranch(
           title={watch.pattern !== undefined ? `${watch.target}  /${watch.pattern}/\n${watch.note}` : `${watch.target}\n${watch.note}`}
           style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '1px 0 1px 16px', minWidth: 0 }}
         >
-          <span style={{ flex: 'none', width: 12, textAlign: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>
-            {KIND_GLYPHS[watch.kind] ?? '•'}
+          <span style={{ flex: 'none', width: 16, display: 'inline-flex', justifyContent: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>
+            <Icon name={KIND_ICONS[watch.kind] ?? 'file'} size={11} />
           </span>
           <span style={{ flex: 'none' }}>{watch.id}</span>
           <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {watch.target}
           </span>
-          <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>
+          <span style={{ flex: 'none', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
             {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}
           </span>
         </div>
@@ -419,8 +536,11 @@ export function SentinelTabView(): ReactNode {
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 12px 6px' }}>
         <StateDot state="ongoing" size={10} />
-        <span style={{ fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>{t('tab')}</span>
-        <span style={{ flex: 1, fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontWeight: 500, color: 'var(--dsw-alias-label-primary)' }}>
+          <Icon name="eye" size={13} />
+          {t('tab')}
+        </span>
+        <span style={{ flex: 1, fontSize: 12, color: 'var(--dsw-alias-label-caption)', fontVariantNumeric: 'tabular-nums' }}>
           {t('count', { count: watches.length })}
         </span>
         <a
@@ -435,14 +555,20 @@ export function SentinelTabView(): ReactNode {
       {watches.length === 0 && (
         <div style={{ padding: '8px 12px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
           {t('tabempty')}
+          <div style={{ marginTop: 4, fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>{t('emptyHint')}</div>
         </div>
       )}
-      {watches.map(watch => (
-        <div key={`${watch.sessionId}-${watch.id}`}>
-          <div style={{ padding: '4px 12px 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
-            {watch.sessionId} · {watch.live ? t('live') : t('dormant')}
+      {[...watches.reduce((groups, watch) => {
+        const list = groups.get(watch.sessionId) ?? []
+        list.push(watch)
+        groups.set(watch.sessionId, list)
+        return groups
+      }, new Map<string, WireWatch[]>()).entries()].map(([sessionId, group]) => (
+        <div key={sessionId}>
+          <div style={{ padding: '6px 12px 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
+            {sessionId} · {group[0]?.live === true ? t('live') : t('dormant')}
           </div>
-          <WatchRow watch={watch} t={t} />
+          {group.map(watch => <WatchRow key={watch.id} watch={watch} t={t} />)}
         </div>
       ))}
       {watches.length > 0 && (
@@ -456,18 +582,7 @@ export function SentinelTabView(): ReactNode {
             {t('nofires')}
           </div>
         )
-        : fires.slice(0, 12).map(fire => (
-          <div
-            key={`${fire.sessionId}-${fire.id}-${fire.at}`}
-            style={{ display: 'flex', gap: 8, padding: '1px 12px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}
-          >
-            <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>{new Date(fire.at).toLocaleTimeString()}</span>
-            <span style={{ flex: 'none' }}>{fire.id}</span>
-            <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {fire.summary}
-            </span>
-          </div>
-        ))}
+        : fires.slice(0, 12).map(fire => <FireRow key={`${fire.sessionId}-${fire.id}-${fire.at}`} fire={fire} t={t} />)}
     </div>
   )
 }
@@ -501,9 +616,7 @@ export function apply(ctx: Context): void {
     ctx.effect(() => sidebar.registerTab({
       id: 'dsh-sentinel:watches',
       title: () => (navigator.language.startsWith('zh') ? zh : en)['tab'],
-      icon: (size: number) => (
-        <span aria-hidden style={{ fontSize: Math.max(12, size - 2), lineHeight: 1 }}>👁</span>
-      ),
+      icon: (size: number) => <Icon name="eye" size={Math.max(12, size - 2)} />,
       order: 60,
       single: true,
       component: () => <SentinelTabView />,
