@@ -167,6 +167,10 @@ class SentinelRuntime {
 
   start(): void {
     this.timer = setInterval(() => { void this.drive() }, HEARTBEAT_MS)
+    // Headless profiles exit when the prompt completes: the heartbeat must not
+    // hold the event loop open there. Web mode stays up on the server's own
+    // handles; subscriptions survive either way through the sidecar log.
+    this.timer.unref()
     void this.loadPersisted()
   }
 
