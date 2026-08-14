@@ -1,4 +1,6 @@
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createServer as createNetServer } from 'node:net'
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -500,4 +502,42 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(passive.followups.length).toBe(1)
     expect(passive.followups[0]).toContain('订阅 watch-2 触发')
   }, 25_000)
+
+  it('fans fires out to the optional notify webhook', async () => {
+    await freshHome()
+    const received: Array<Record<string, unknown>> = []
+    const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+      let data = ''
+      req.on('data', (chunk: Buffer) => { data += chunk.toString() })
+      req.on('end', () => {
+        try { received.push(JSON.parse(data) as Record<string, unknown>) } catch { /* not for us */ }
+        res.writeHead(204)
+        res.end()
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = server.address() as { port: number }
+
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 500, notifyWebhookUrl: `http://127.0.0.1:${String(port)}/hook` })
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(400)
+
+    const dir = await mkdtemp(join(tmpdir(), 'sentinel-notify-'))
+    dirs.push(dir)
+    const flag = join(dir, 'flag.txt')
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({ kind: 'file', target: flag, interval_seconds: 5, note: 'notify fanout', max_fires: 1 }, {})
+    await sleep(1200)
+    await writeFile(flag, 'go')
+    await sleep(2500)
+
+    expect(received.length).toBe(1)
+    expect(received[0]?.['event']).toBe('fired')
+    expect(received[0]?.['id']).toBe('watch-1')
+    expect(received[0]?.['summary']).toContain('快照')
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }, 20_000)
 })

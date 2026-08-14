@@ -47,9 +47,12 @@ All deployment-tunable knobs live in the plugin's config schema (defaults in par
     maxPendingWakeups: 8         # queued wakeups per session before dropping oldest
     defaultIntervalSeconds: 30   # when a watch does not specify one (5–86400)
     defaultCooldownSeconds: 60
+    notifyWebhookUrl: ''         # optional: POST every fire here as JSON
 ```
 
 Invalid values fail plugin load with a schema error rather than misbehaving at runtime.
+
+`notifyWebhookUrl` fans every fire out of the harness as a JSON POST (`{plugin, event, sessionId, id, kind, target, note, fireNumber, maxFires, summary, after}`) — point it at a Lark/WeCom/Slack bot or any receiver. Delivery is at-most-once: a failed POST warns in the log and never blocks the in-harness wakeup.
 
 ## Tools
 
@@ -68,7 +71,7 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.6.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.7.0"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:

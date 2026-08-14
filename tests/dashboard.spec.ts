@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { dashboardHtml, type WatchRow } from '../src/index.ts'
+import { dashboardHtml, localizeState, type WatchRow } from '../src/index.ts'
 
 function row(overrides: Partial<WatchRow> = {}): WatchRow {
   return {
@@ -42,5 +42,28 @@ describe('dashboardHtml', () => {
     expect(html).not.toContain('<img src=x')
     expect(html).not.toContain('<b>bold</b>')
     expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+  })
+
+  it('embeds the bilingual switch script', () => {
+    const html = dashboardHtml([])
+    expect(html).toContain('navigator.language')
+    expect(html).toContain('localizeState')
+  })
+})
+
+describe('localizeState', () => {
+  it('maps sensor state words to Chinese and passes English through', () => {
+    expect(localizeState('absent', true)).toBe('不存在')
+    expect(localizeState('exists (12 bytes)', true)).toBe('存在 (12 bytes)')
+    expect(localizeState('exit 2', true)).toBe('退出码 2')
+    expect(localizeState('unreachable', true)).toBe('不可达')
+    expect(localizeState('no process', true)).toBe('无进程')
+    expect(localizeState('3 process(es)', true)).toBe('3 个进程')
+    expect(localizeState('open (db:5432)', true)).toBe('端口可达 (db:5432)')
+    expect(localizeState('closed (db:5432)', true)).toBe('端口不通 (db:5432)')
+    expect(localizeState('timeout (db:5432)', true)).toBe('探测超时 (db:5432)')
+    expect(localizeState('awaiting push', true)).toBe('等待推送')
+    expect(localizeState('HTTP 200', true)).toBe('HTTP 200')
+    expect(localizeState('exit 2', false)).toBe('exit 2')
   })
 })

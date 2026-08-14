@@ -79,6 +79,13 @@ export interface Config {
    * takes over this long after the owner crashes or exits.
    */
   dutyLeaseTtlMs: number
+  /**
+   * Optional external notify webhook: every fire is POSTed there as JSON
+   * (at-most-once; failures warn and never block the wakeup pipeline).
+   * Point it at a Lark/WeCom/Slack bot or any receiver to fan sentinel
+   * events out of the harness.
+   */
+  notifyWebhookUrl?: string
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -99,6 +106,7 @@ export const Config: Schema<Config> = Schema.object({
   defaultIntervalSeconds: Schema.number().default(DEFAULT_CONFIG.defaultIntervalSeconds).description(`Probe interval used when a watch does not specify one (seconds, clamped to ${String(MIN_INTERVAL_SECONDS)}–${String(MAX_INTERVAL_SECONDS)}).`),
   defaultCooldownSeconds: Schema.number().default(DEFAULT_CONFIG.defaultCooldownSeconds).description('Cooldown used when a watch does not specify one (seconds).'),
   dutyLeaseTtlMs: Schema.number().default(DEFAULT_CONFIG.dutyLeaseTtlMs).description('Sentinel-duty lease TTL in ms: a second dsh process stays passive while a fresh lease exists; takeover happens this long after the owner dies.'),
+  notifyWebhookUrl: Schema.string().description('Optional external notify webhook: every fire is POSTed there as JSON (at-most-once; failures never block wakeup delivery).'),
 })
 
 const PLUGIN_ID = 'dsh-sentinel'
@@ -703,11 +711,46 @@ class SentinelRuntime {
     })
     watch.recentFires.unshift({ id: sub.id, at, summary: fact.summary })
     if (watch.recentFires.length > 20) watch.recentFires.pop()
+    void this.notifyFire(watch, sub, fact)
     watch.pendingWakeups.push(renderWakeup(sub, fact))
     if (watch.pendingWakeups.length > this.config.maxPendingWakeups) {
       const dropped = watch.pendingWakeups.length - this.config.maxPendingWakeups
       watch.pendingWakeups.splice(0, dropped)
       this.warn(`pending wakeup overflow for "${watch.sessionId}": dropped ${String(dropped)} oldest (agent busy?)`)
+    }
+  }
+
+  /** Fan one fire out to the optional external notify webhook. At-most-once:
+   * a failed POST warns and never blocks the wakeup pipeline. */
+  private async notifyFire(watch: SessionWatch, sub: Subscription, fact: FireFact): Promise<void> {
+    const url = this.config.notifyWebhookUrl
+    if (url === undefined || url === '') return
+    const controller = new AbortController()
+    const timer = setTimeout(() => { controller.abort() }, 5000)
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          plugin: PLUGIN_ID,
+          event: 'fired',
+          sessionId: watch.sessionId,
+          id: sub.id,
+          kind: sub.spec.kind,
+          target: sub.spec.target,
+          note: sub.note,
+          fireNumber: fact.fireNumber,
+          maxFires: sub.maxFires,
+          summary: fact.summary,
+          after: fact.after,
+        }),
+      })
+      if (!response.ok) this.warn(`notify webhook returned HTTP ${String(response.status)}`)
+    } catch (error: unknown) {
+      this.warn(`notify webhook failed: ${describe(error)}`)
+    } finally {
+      clearTimeout(timer)
     }
   }
 
@@ -1077,12 +1120,29 @@ function escapeHtml(value: string): string {
 }
 
 /** One dashboard table row (server render and the client refresh share it). */
-function watchRowHtml(row: WatchRow): string {
-  const session = `${escapeHtml(row.sessionId.slice(0, 16))}… <small>${row.live ? '活跃' : '休眠'}</small>`
+/** Localize a raw sensor state word for the dashboard (zh falls back to the original). Exported for tests. */
+export function localizeState(state: string, zh: boolean): string {
+  if (!zh) return state
+  if (state === 'absent') return '不存在'
+  if (state.startsWith('exists')) return `存在${state.slice('exists'.length)}`
+  if (state.startsWith('exit')) return `退出码${state.slice('exit'.length)}`
+  if (state === 'unreachable') return '不可达'
+  if (state === 'no process') return '无进程'
+  if (state.endsWith('process(es)')) return `${state.slice(0, -'process(es)'.length).trim()} 个进程`
+  if (state.startsWith('open ')) return `端口可达${state.slice('open'.length)}`
+  if (state.startsWith('closed ')) return `端口不通${state.slice('closed'.length)}`
+  if (state.startsWith('timeout ')) return `探测超时${state.slice('timeout'.length)}`
+  if (state === 'awaiting push') return '等待推送'
+  return state
+}
+
+/** One dashboard row; shared by the server-side initial render (zh) and the page script (browser language). */
+function watchRowHtml(row: WatchRow, zh: boolean = true): string {
+  const session = `${escapeHtml(row.sessionId.slice(0, 16))}… <small>${row.live ? (zh ? '活跃' : 'live') : (zh ? '休眠' : 'dormant')}</small>`
   const pattern = row.pattern !== undefined ? `<code>/${escapeHtml(row.pattern)}/</code>` : '—'
-  const lastState = row.lastState !== undefined ? escapeHtml(row.lastState) : '探测中'
+  const lastState = row.lastState !== undefined ? escapeHtml(localizeState(row.lastState, zh)) : (zh ? '探测中' : 'probing')
   const next = row.kind === 'webhook'
-    ? '即时推送'
+    ? (zh ? '即时推送' : 'live push')
     : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…'
   return `<tr><td>${session}</td><td>${escapeHtml(row.id)}</td><td>${escapeHtml(row.kind)}</td>`
     + `<td class="target" title="${escapeHtml(row.note)}">${escapeHtml(row.target)}</td><td>${pattern}</td>`
@@ -1098,7 +1158,7 @@ function watchRowHtml(row: WatchRow): string {
 export function dashboardHtml(rows: readonly WatchRow[]): string {
   const body = rows.length === 0
     ? '<tr><td colspan="8" class="empty">当前没有活跃的监控。</td></tr>'
-    : rows.map(watchRowHtml).join('')
+    : rows.map(row => watchRowHtml(row)).join('')
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -1118,7 +1178,7 @@ export function dashboardHtml(rows: readonly WatchRow[]): string {
 </style>
 </head>
 <body>
-<h1>👁 Sentinel 全局总览 <small id="meta"></small></h1>
+<h1><span id="title">👁 Sentinel 全局总览</span> <small id="meta"></small></h1>
 <table>
 <thead><tr><th>会话</th><th>监控</th><th>传感器</th><th>目标</th><th>模式</th><th>触发</th><th>最近状态</th><th>下次探测</th></tr></thead>
 <tbody id="rows">${body}</tbody>
@@ -1126,7 +1186,20 @@ export function dashboardHtml(rows: readonly WatchRow[]): string {
 <script>
 const ROWS = document.getElementById('rows')
 const META = document.getElementById('meta')
-const render = ${watchRowHtml.toString()}
+const isZh = navigator.language.startsWith('zh')
+document.documentElement.lang = isZh ? 'zh-CN' : 'en'
+const DICT = isZh ? {} : {
+  title: 'Sentinel overview',
+  heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe'],
+  empty: 'No active watches right now.',
+  count: 'watch(es)',
+}
+if (!isZh) {
+  document.getElementById('title').textContent = '👁 ' + DICT.title
+  document.querySelectorAll('thead th').forEach((th, i) => { th.textContent = DICT.heads[i] })
+}
+const localizeState = ${localizeState.toString()}
+const render = (row) => (${watchRowHtml.toString()})(row, isZh)
 const escapeHtml = ${escapeHtml.toString()}
 // watchRowHtml's body references Date.now through the next-probe cell; keep it.
 const refresh = async () => {
@@ -1136,9 +1209,9 @@ const refresh = async () => {
     const data = await res.json()
     const watches = Array.isArray(data.watches) ? data.watches : []
     ROWS.innerHTML = watches.length === 0
-      ? '<tr><td colspan="8" class="empty">当前没有活跃的监控。</td></tr>'
+      ? '<tr><td colspan="8" class="empty">' + (isZh ? '当前没有活跃的监控。' : DICT.empty) + '</td></tr>'
       : watches.map(render).join('')
-    META.textContent = '· ' + String(watches.length) + ' 个监控 · ' + new Date().toLocaleTimeString()
+    META.textContent = '· ' + String(watches.length) + ' ' + (isZh ? '个监控' : DICT.count) + ' · ' + new Date().toLocaleTimeString()
   } catch {}
 }
 refresh()
