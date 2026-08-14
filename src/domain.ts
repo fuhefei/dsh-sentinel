@@ -95,6 +95,16 @@ export type SentinelChange =
   | {
     readonly version: number
     /**
+     * Delivery watermark: every fire recorded before `at` has been delivered
+     * to the session. Boot-time requeue rebuilds only the fired-but-not-yet-
+     * delivered wakeups from it (crash-window recovery).
+     */
+    readonly change: 'delivered'
+    readonly at: string
+  }
+  | {
+    readonly version: number
+    /**
      * Boot-time compaction artifact: one row replacing a session's whole
      * history, carrying the subscription exactly as folded (fire budget and
      * last observation included). Old readers reject it as an unknown change.
@@ -272,6 +282,11 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     }
     return { version: SENTINEL_CHANGE_VERSION, change: 'cancelled', id, at, reason }
   }
+  if (change === 'delivered') {
+    const at = value['at']
+    if (typeof at !== 'string') throw new SentinelLogError('delivered change must carry at')
+    return { version: SENTINEL_CHANGE_VERSION, change: 'delivered', at }
+  }
   if (change === 'compacted') {
     const sub = value['subscription']
     if (!isRecord(sub)) throw new SentinelLogError('compacted change must carry a subscription object')
@@ -323,10 +338,26 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
 }
 
 /** The folded live picture: active subscriptions by id. */
+export interface UndeliveredFire {
+  /** Watch id the fire belongs to. */
+  readonly id: string
+  /** Fired-row instant (RFC 3339; ordered against delivered watermarks). */
+  readonly at: string
+  /** Subscription as of the fire — renders the wakeup without re-probing. */
+  readonly sub: Subscription
+  readonly fact: FireFact
+}
+
 export interface FoldedSentinel {
   readonly active: ReadonlyMap<string, Subscription>
   /** Highest numeric suffix seen across all created ids (for allocation). */
   readonly lastOrdinal: number
+  /**
+   * Fires still awaiting delivery: recorded after the latest `delivered`
+   * watermark (or with no watermark at all). Boot requeues these so a crash
+   * between logging a fire and delivering it cannot lose the wakeup.
+   */
+  readonly undeliveredFires: readonly UndeliveredFire[]
 }
 
 /** Event-row shape the fold needs (structural view of a session event). */
@@ -343,6 +374,7 @@ export interface SentinelEventRow {
 export function foldSentinelEvents(events: Iterable<SentinelEventRow>): FoldedSentinel {
   const active = new Map<string, Subscription>()
   let lastOrdinal = 0
+  let undelivered: UndeliveredFire[] = []
   for (const event of events) {
     if (event.type !== SENTINEL_CHANGE_TYPE) continue
     const change = decodeSentinelChange(event.payload)
@@ -375,13 +407,23 @@ export function foldSentinelEvents(events: Iterable<SentinelEventRow>): FoldedSe
         lastFiredAt: change.at,
         ...(change.observed !== undefined ? { lastKnown: change.observed } : {}),
       }
+      undelivered.push({ id: change.id, at: change.at, sub: fired, fact: change.fact })
       if (fired.fireCount >= fired.maxFires) active.delete(change.id)
       else active.set(change.id, fired)
       continue
     }
+    if (change.change === 'delivered') {
+      // RFC 3339 UTC strings from one writer are lexicographically ordered.
+      undelivered = undelivered.filter(entry => entry.at > change.at)
+      continue
+    }
+    if (change.change === 'cancelled') {
+      // Cancellation withdraws the intent; queued wakeups for it die too.
+      undelivered = undelivered.filter(entry => entry.id !== change.id)
+    }
     active.delete(change.id)
   }
-  return { active, lastOrdinal }
+  return { active, lastOrdinal, undeliveredFires: undelivered }
 }
 
 /** Allocate the next watch id given the folded picture. */

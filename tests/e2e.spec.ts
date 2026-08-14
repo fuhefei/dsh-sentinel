@@ -209,7 +209,9 @@ describe('sentinel end-to-end (in-process)', () => {
       },
     })
     push({ version: 1, change: 'fired', id: 'watch-9', at: '2026-08-13T01:00:00.000Z', fact: { fireNumber: 1, summary: 's', before: '', after: 'x', probeMs: 1 } })
+    push({ version: 1, change: 'delivered', at: '2026-08-13T01:30:00.000Z' })
     push({ version: 1, change: 'fired', id: 'watch-9', at: '2026-08-13T02:00:00.000Z', fact: { fireNumber: 2, summary: 's', before: '', after: 'x', probeMs: 1 } })
+    push({ version: 1, change: 'delivered', at: '2026-08-13T02:30:00.000Z' })
     for (let index = 0; index < 20; index += 1) {
       const id = `watch-c${String(index)}`
       push({
@@ -329,6 +331,7 @@ describe('sentinel end-to-end (in-process)', () => {
     harnesses.push(harness)
     apply(harness.rootCtx as never)
     harness.emit('agent/created', { agent: harness.agent })
+    await sleep(400)
 
     const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
     if (watchTool === undefined) throw new Error('watch tool missing')
@@ -415,4 +418,86 @@ describe('sentinel end-to-end (in-process)', () => {
     await expect(watchTool.execute({ kind: 'process', target: 'second-proc', note: 'over the cap', max_fires: 1 }, {}))
       .rejects.toThrow('subscription limit reached (1)')
   })
+
+  it('requeues a fired-but-undelivered wakeup across a crash restart', async () => {
+    await freshHome()
+    // First process: register the watch, let it fire while the agent is busy
+    // (delivery blocked), then "crash" — the sidecar has the fired row, the
+    // in-memory wakeup queue is gone.
+    const first = makeHarness()
+    harnesses.push(first)
+    apply(first.rootCtx as never)
+    first.emit('agent/created', { agent: first.agent })
+    first.agent.status = 'busy'
+
+    const dir = await mkdtemp(join(tmpdir(), 'sentinel-crash-'))
+    dirs.push(dir)
+    const flag = join(dir, 'flag.txt')
+    const watchTool = first.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({ kind: 'file', target: flag, interval_seconds: 5, note: 'crash window recovery', max_fires: 1 }, {})
+    await sleep(1000)
+    await writeFile(flag, 'deploy ready')
+    await sleep(7000)
+    expect(first.followups.length).toBe(0)
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) cleanup()
+
+    // Second process, same DSH_HOME: boot requeues the fire and delivers it.
+    const second = makeHarness(['session-e2e'])
+    harnesses.push(second)
+    apply(second.rootCtx as never)
+    second.emit('agent/created', { agent: second.agent })
+    await sleep(7000)
+    expect(second.followups.length).toBe(1)
+    expect(second.followups[0]).toContain('[dsh-sentinel] 订阅 watch-1 触发')
+
+    // Delivery wrote its watermark: no third delivery of the same fire.
+    const lines = await storeLines()
+    expect(lines.some(line => line.change.change === 'delivered')).toBe(true)
+  }, 30_000)
+
+  it('runs one duty owner per DSH_HOME: passive instance defers, then takes over', async () => {
+    await freshHome()
+    const cfg = { ...DEFAULT_CONFIG, heartbeatMs: 500, dutyLeaseTtlMs: 400 }
+
+    // Owner claims the duty lease first.
+    const owner = makeHarness()
+    harnesses.push(owner)
+    apply(owner.rootCtx as never, cfg)
+    await sleep(700)
+
+    // Second instance on the same DSH_HOME: passive — its tools work and
+    // writes persist, but probing and delivery belong to the owner (which
+    // adopts the new rows through the heartbeat store sync).
+    const passive = makeHarness()
+    harnesses.push(passive)
+    apply(passive.rootCtx as never, cfg)
+    passive.emit('agent/created', { agent: passive.agent })
+    await sleep(300)
+    const watchTool = passive.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    const leaseDir = await mkdtemp(join(tmpdir(), 'sentinel-lease-live-'))
+    dirs.push(leaseDir)
+    const leaseFlag = join(leaseDir, 'flag.txt')
+    await watchTool.execute({ kind: 'file', target: leaseFlag, interval_seconds: 5, note: 'passive defers', max_fires: 1 }, {})
+    await sleep(1500)
+    await writeFile(leaseFlag, 'owner should deliver this')
+    await sleep(2500)
+    expect(passive.followups.length).toBe(0)
+    expect(owner.followups.length).toBe(1)
+
+    // Owner exits (lease released): the passive instance takes over within a
+    // heartbeat and now probes and delivers itself.
+    for (const cleanup of owner.cleanups.splice(0, owner.cleanups.length)) cleanup()
+    await sleep(1000)
+    const dir = await mkdtemp(join(tmpdir(), 'sentinel-lease-'))
+    dirs.push(dir)
+    const flag = join(dir, 'flag.txt')
+    await watchTool.execute({ kind: 'file', target: flag, interval_seconds: 5, note: 'takeover', max_fires: 1 }, {})
+    await sleep(1200)
+    await writeFile(flag, 'took over')
+    await sleep(1500)
+    expect(passive.followups.length).toBe(1)
+    expect(passive.followups[0]).toContain('订阅 watch-2 触发')
+  }, 25_000)
 })

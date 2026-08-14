@@ -114,6 +114,38 @@ describe('foldSentinelEvents', () => {
     expect(folded.active.size).toBe(0)
   })
 
+  it('keeps fired-but-undelivered fires for the boot requeue', () => {
+    const folded = foldSentinelEvents([
+      createdEvent('watch-1'),
+      firedEvent('watch-1', '2026-08-12T01:00:00.000Z'),
+    ])
+    expect(folded.undeliveredFires.length).toBe(1)
+    expect(folded.undeliveredFires[0]?.fact.fireNumber).toBe(1)
+  })
+
+  it('clears undelivered fires behind a delivered watermark, keeps later ones', () => {
+    const folded = foldSentinelEvents([
+      createdEvent('watch-1'),
+      firedEvent('watch-1', '2026-08-12T01:00:00.000Z'),
+      { type: SENTINEL_CHANGE_TYPE, payload: { version: SENTINEL_CHANGE_VERSION, change: 'delivered', at: '2026-08-12T01:00:01.000Z' } },
+      firedEvent('watch-1', '2026-08-12T02:00:00.000Z'),
+    ])
+    expect(folded.undeliveredFires.length).toBe(1)
+    expect(folded.undeliveredFires[0]?.at).toBe('2026-08-12T02:00:00.000Z')
+  })
+
+  it('cancellation withdraws queued undelivered wakeups', () => {
+    const folded = foldSentinelEvents([
+      createdEvent('watch-1'),
+      firedEvent('watch-1', '2026-08-12T01:00:00.000Z'),
+      {
+        type: SENTINEL_CHANGE_TYPE,
+        payload: { version: SENTINEL_CHANGE_VERSION, change: 'cancelled', id: 'watch-1', at: '2026-08-12T01:00:01.000Z', reason: 'agent' },
+      },
+    ])
+    expect(folded.undeliveredFires.length).toBe(0)
+  })
+
   it('allocates monotonically past every seen ordinal', () => {
     const folded = foldSentinelEvents([createdEvent('watch-7')])
     expect(allocateWatchId(folded)).toBe('watch-8')

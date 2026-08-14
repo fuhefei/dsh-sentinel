@@ -20,7 +20,7 @@
  * profiles without a webServer service still load the runtime and tools.
  */
 import { watch as fsWatch, type FSWatcher } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
@@ -73,6 +73,12 @@ export interface Config {
   defaultIntervalSeconds: number
   /** Cooldown used when a watch does not specify one (seconds). */
   defaultCooldownSeconds: number
+  /**
+   * Sentinel-duty lease TTL (ms): a second dsh process on the same DSH_HOME
+   * stays passive (no probing, no delivery) while a fresh lease exists, and
+   * takes over this long after the owner crashes or exits.
+   */
+  dutyLeaseTtlMs: number
 }
 
 export const DEFAULT_CONFIG: Config = {
@@ -82,6 +88,7 @@ export const DEFAULT_CONFIG: Config = {
   maxPendingWakeups: 8,
   defaultIntervalSeconds: DEFAULT_INTERVAL_SECONDS,
   defaultCooldownSeconds: DEFAULT_COOLDOWN_SECONDS,
+  dutyLeaseTtlMs: 30_000,
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -91,6 +98,7 @@ export const Config: Schema<Config> = Schema.object({
   maxPendingWakeups: Schema.number().default(DEFAULT_CONFIG.maxPendingWakeups).description('Queued wakeups kept per session before the oldest drop (with a warning).'),
   defaultIntervalSeconds: Schema.number().default(DEFAULT_CONFIG.defaultIntervalSeconds).description(`Probe interval used when a watch does not specify one (seconds, clamped to ${String(MIN_INTERVAL_SECONDS)}–${String(MAX_INTERVAL_SECONDS)}).`),
   defaultCooldownSeconds: Schema.number().default(DEFAULT_CONFIG.defaultCooldownSeconds).description('Cooldown used when a watch does not specify one (seconds).'),
+  dutyLeaseTtlMs: Schema.number().default(DEFAULT_CONFIG.dutyLeaseTtlMs).description('Sentinel-duty lease TTL in ms: a second dsh process stays passive while a fresh lease exists; takeover happens this long after the owner dies.'),
 })
 
 const PLUGIN_ID = 'dsh-sentinel'
@@ -107,6 +115,12 @@ const COMPACTION_MARGIN = 32
 export function storePath(): string {
   const home = process.env['DSH_HOME'] ?? join(homedir(), '.dsh')
   return join(home, 'sentinel.jsonl')
+}
+
+/** Sentinel-duty lease location: `$DSH_HOME/sentinel.lease`. */
+export function leasePath(): string {
+  const home = process.env['DSH_HOME'] ?? join(homedir(), '.dsh')
+  return join(home, 'sentinel.lease')
 }
 
 /** Structural view of the host Agent surface this plugin touches. */
@@ -169,7 +183,7 @@ interface FireRecord {
 
 /** All sentinel state for one session; lives as long as the server, not the agent. */
 class SessionWatch {
-  folded: FoldedSentinel = { active: new Map(), lastOrdinal: 0 }
+  folded: FoldedSentinel = { active: new Map(), lastOrdinal: 0, undeliveredFires: [] }
   rows: FoldableRow[] = []
   readonly probes = new Map<string, ProbeState>()
   readonly watchers = new Map<string, { watcher: FSWatcher; mode: 'direct' | 'parent' }>()
@@ -200,6 +214,8 @@ class SentinelRuntime {
   private readonly handles: Array<{ dispose(): void | Promise<void> }> = []
   private timer: ReturnType<typeof setInterval> | undefined
   private disposed = false
+  /** This process owns probing/delivery. False while another instance's lease is fresh. */
+  private duty = false
 
   constructor(
     private readonly ctx: ContextLike,
@@ -213,7 +229,73 @@ class SentinelRuntime {
     // hold the event loop open there. Web mode stays up on the server's own
     // handles; subscriptions survive either way through the sidecar log.
     this.timer.unref()
-    void this.loadPersisted()
+    void this.claimDuty().then(() => { void this.loadPersisted() })
+  }
+
+  /**
+   * Sentinel duty lease: one probing/delivering owner per DSH_HOME. A fresh
+   * lease held by a live pid keeps this instance passive (tools still work,
+   * writes still persist); the passive side re-checks every heartbeat and
+   * takes over once the owner's lease goes stale. The claim race window is
+   * one heartbeat at worst — the TTL self-heals a double claim.
+   */
+  private async claimDuty(): Promise<void> {
+    const lease = await this.readLease()
+    if (lease !== undefined
+      && Date.now() - lease.at < this.config.dutyLeaseTtlMs
+      && this.pidAlive(lease.pid)) {
+      this.duty = false
+      this.warn(`another dsh process (pid ${String(lease.pid)}) owns sentinel duty; staying passive until its lease goes stale`)
+      return
+    }
+    try {
+      await this.writeLease()
+      // Lost a simultaneous claim? The winner's pid is on disk now.
+      await sleep(150)
+      const reread = await this.readLease()
+      this.duty = reread?.pid === process.pid
+      if (!this.duty) this.warn(`lost the sentinel-duty claim to pid ${String(reread?.pid ?? 'unknown')}; staying passive`)
+    } catch (error: unknown) {
+      // Cannot write the lease: never probe on ambiguity, the owner might exist.
+      this.duty = false
+      this.warn(`sentinel-duty lease write failed: ${describe(error)}; staying passive`)
+    }
+  }
+
+  private async renewLease(): Promise<void> {
+    try {
+      await this.writeLease()
+    } catch (error: unknown) {
+      this.warn(`sentinel-duty lease renewal failed: ${describe(error)}`)
+    }
+  }
+
+  private async readLease(): Promise<{ pid: number; at: number } | undefined> {
+    try {
+      const parsed = JSON.parse(await readFile(leasePath(), 'utf8')) as { pid?: unknown; at?: unknown }
+      if (typeof parsed.pid !== 'number' || typeof parsed.at !== 'number') return undefined
+      return { pid: parsed.pid, at: parsed.at }
+    } catch {
+      return undefined
+    }
+  }
+
+  private async writeLease(): Promise<void> {
+    const path = leasePath()
+    const tmp = `${path}.tmp`
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(tmp, JSON.stringify({ pid: process.pid, at: Date.now() }), 'utf8')
+    await rename(tmp, path)
+  }
+
+  private pidAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0)
+      return true
+    } catch (error: unknown) {
+      // EPERM means the process exists under another user.
+      return (error as NodeJS.ErrnoException).code === 'EPERM'
+    }
   }
 
   /** Absolute webhook URL when the web server port is known; bare path in
@@ -227,6 +309,7 @@ class SentinelRuntime {
   dispose(): void {
     this.disposed = true
     if (this.timer !== undefined) clearInterval(this.timer)
+    if (this.duty) void unlink(leasePath()).catch(() => {})
     for (const watch of this.watches.values()) watch.closeSensors()
     this.watches.clear()
     for (const handle of this.handles.splice(0, this.handles.length)) {
@@ -250,13 +333,48 @@ class SentinelRuntime {
       const watch = this.watchOf(sessionId)
       watch.rows = rows
       this.refold(watch)
-      if (watch.folded.active.size === 0) {
+      this.requeueUndelivered(watch)
+      if (watch.folded.active.size === 0 && watch.pendingWakeups.length === 0) {
         watch.closeSensors()
         this.watches.delete(sessionId)
       }
     }
     this.compact(totalRows)
     void this.drive()
+  }
+
+  /** Crash-window recovery: fires logged after the latest delivered watermark
+   * requeue now (oldest first, capped like any batch) so a crash between
+   * logging and delivering cannot lose the wakeup. */
+  private requeueUndelivered(watch: SessionWatch): void {
+    const pending = watch.folded.undeliveredFires
+    if (pending.length === 0) return
+    watch.pendingWakeups.push(...pending.slice(-this.config.maxPendingWakeups).map(entry => renderWakeup(entry.sub, entry.fact)))
+    this.warn(`requeued ${String(pending.length)} undelivered wakeup(s) for "${watch.sessionId}"`)
+  }
+
+  /**
+   * Adopt rows another process appended: with the duty lease, a passive
+   * instance still serves tools and writes the shared sidecar, so the duty
+   * owner re-reads the log each heartbeat and folds anything past its
+   * in-memory picture. The file only ever grows past our rows (our own
+   * appends push rows first), so a length comparison is the adoption test.
+   */
+  private async syncFromStore(): Promise<void> {
+    let grouped: Map<string, FoldableRow[]>
+    try {
+      grouped = await this.store.load()
+    } catch {
+      return
+    }
+    if (this.disposed) return
+    for (const [sessionId, rows] of grouped) {
+      const watch = this.watchOf(sessionId)
+      if (rows.length <= watch.rows.length) continue
+      watch.rows = rows
+      this.refold(watch)
+      this.requeueUndelivered(watch)
+    }
   }
 
   /**
@@ -266,7 +384,11 @@ class SentinelRuntime {
    */
   private compact(totalRows: number): void {
     let activeCount = 0
-    for (const watch of this.watches.values()) activeCount += watch.folded.active.size
+    for (const watch of this.watches.values()) {
+      activeCount += watch.folded.active.size
+      // History still owes wakeups: rewriting now would drop them. Retry next boot.
+      if (watch.folded.undeliveredFires.length > 0) return
+    }
     if (totalRows <= activeCount * 4 + COMPACTION_MARGIN) return
     const lines: string[] = []
     for (const watch of this.watches.values()) {
@@ -323,7 +445,7 @@ class SentinelRuntime {
     } catch (error: unknown) {
       // A corrupt sentinel row must not take the session down; surface and continue empty.
       this.warn(`fold failed for session "${watch.sessionId}": ${describe(error)}`)
-      watch.folded = { active: new Map(), lastOrdinal: 0 }
+      watch.folded = { active: new Map(), lastOrdinal: 0, undeliveredFires: [] }
     }
     for (const id of [...watch.probes.keys()]) {
       if (!watch.folded.active.has(id)) watch.probes.delete(id)
@@ -433,6 +555,13 @@ class SentinelRuntime {
    */
   private async drive(): Promise<void> {
     if (this.disposed) return
+    if (this.duty) {
+      await this.renewLease()
+    } else {
+      await this.claimDuty()
+      if (!this.duty) return
+    }
+    await this.syncFromStore()
     const tasks: Array<() => Promise<void>> = []
     const now = Date.now()
     for (const watch of [...this.watches.values()]) {
@@ -630,7 +759,7 @@ class SentinelRuntime {
    * whole reason to exist.
    */
   private async deliver(watch: SessionWatch): Promise<void> {
-    if (watch.pendingWakeups.length === 0) return
+    if (!this.duty || watch.pendingWakeups.length === 0) return
     let agent: AgentLike
     try {
       agent = await this.ensureAgent(watch.sessionId)
@@ -648,6 +777,14 @@ class SentinelRuntime {
     } catch (error: unknown) {
       this.warn(`wakeup delivery failed for session "${watch.sessionId}": ${describe(error)}`)
       watch.pendingWakeups.unshift(...batch)
+      return
+    }
+    // Delivery watermark (at-least-once): if this write fails, the next boot
+    // requeues the same batch once — a duplicate beats a lost wakeup.
+    try {
+      await this.commit(watch, { version: SENTINEL_CHANGE_VERSION, change: 'delivered', at: new Date().toISOString() })
+    } catch (error: unknown) {
+      this.warn(`delivered watermark write failed for "${watch.sessionId}": ${describe(error)}`)
     }
   }
 
@@ -660,6 +797,10 @@ class SentinelRuntime {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms))
 }
 
 const WATCH_OUTPUT_SCHEMA = {
