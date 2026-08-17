@@ -7,3 +7,4 @@ lib/*
 *.bak
 driver*.sh
 verify*.sh
+lib/*.bak
