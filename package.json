@@ -1,8 +1,8 @@
 {
-  "name": "@dsh-external/dsh-sentinel",
-  "version": "0.10.0",
+  "name": "dsh-sentinel",
+  "version": "0.11.0",
   "license": "BSD-3-Clause",
-  "description": "DSH 哨兵：条件驱动的 agent 唤醒系统——文件/进程/端口/命令传感器，订阅存为会话事件，重启自动复活；每个订阅、每次触发对用户完全可见",
+  "description": "DSH \u54e8\u5175\uff1a\u6761\u4ef6\u9a71\u52a8\u7684 agent \u5524\u9192\u7cfb\u7edf\u2014\u2014\u6587\u4ef6/\u8fdb\u7a0b/\u7aef\u53e3/\u547d\u4ee4\u4f20\u611f\u5668\uff0c\u8ba2\u9605\u5b58\u4e3a\u4f1a\u8bdd\u4e8b\u4ef6\uff0c\u91cd\u542f\u81ea\u52a8\u590d\u6d3b\uff1b\u6bcf\u4e2a\u8ba2\u9605\u3001\u6bcf\u6b21\u89e6\u53d1\u5bf9\u7528\u6237\u5b8c\u5168\u53ef\u89c1",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -20,7 +20,11 @@
   "files": [
     "lib",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "README.zh.md",
+    "SECURITY.md",
+    "docs",
+    "patches"
   ],
   "dsh": {
     "bundle": {

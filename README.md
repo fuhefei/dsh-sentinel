@@ -1,5 +1,7 @@
 # dsh-sentinel
 
+English | [中文](README.zh.md)
+
 Condition-driven wakeup for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness): the agent registers a watch, goes to sleep — even closes the session — and the sentinel wakes it when the condition happens. Every subscription and every fire is a user-visible session event, and the browser dock shows what is on duty.
 
 ![Sentinel dock panel, expanded](docs/preview/sentinel-panel.png)
@@ -39,7 +41,7 @@ All deployment-tunable knobs live in the plugin's config schema (defaults in par
 
 ```yaml
 - id: dsh-sentinel
-  name: '@dsh-external/dsh-sentinel'
+  name: dsh-sentinel
   config:
     heartbeatMs: 5000            # probe round interval
     probeConcurrency: 8          # in-flight probes per round
@@ -73,10 +75,16 @@ First-probe semantics: a pattern-less watch absorbs its first observation as the
 
 ## Install
 
-One line through the official bundle channel (build artifacts are committed, so the git-source install runs no build):
+One line through the official bundle channel:
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.10.0"
+dsh plugin --profile web add dsh-sentinel
+```
+
+Or straight from git (build artifacts are committed, so the git-source install runs no build):
+
+```sh
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.11.0"
 ```
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:
@@ -85,7 +93,7 @@ Alternatively, add the node half manually through a patch-list configuration ove
 # cordis.patch.yml
 - insert:
     - id: dsh-sentinel
-      name: '@dsh-external/dsh-sentinel'
+      name: dsh-sentinel
 ```
 
 The browser half ships in the same package (`./client`) and is injected by the Web UI's plugin loader.

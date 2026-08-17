@@ -1,4 +1,4 @@
 # dsh-sentinel bundle: mount the node half (sensors runtime + sentinel tool + readonly routes)
 - insert:
     - id: dsh-sentinel
-      name: '@dsh-external/dsh-sentinel'
+      name: dsh-sentinel
