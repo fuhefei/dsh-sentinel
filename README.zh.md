@@ -73,7 +73,17 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 首次探测语义：不带 pattern 的 watch 把第一次观测吸收为基线（不触发）；带 pattern 的 watch 如果目标已经匹配，第一次探测就触发——条件本来就成立。
 
+## 兼容性
+
+在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）：
+
+- `0.1.0-rc.8` —— 2026-08-20，scratch profile 冒烟
+- `0.1.0-rc.7` —— 2026-08-20，正式 web 部署
+
+dsh-sentinel 不依赖任何 `@deepseek-ai/*` 包。这里的兼容指 cordis loader 条目、`ctx.agents.resume()` 跟进通道和 web 路由持续可用；若某版本破坏了其中任一环节，请提 issue。
+
 ## 安装
+
 
 走官方 bundle 通道一行装完：
 

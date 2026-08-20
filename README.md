@@ -73,7 +73,17 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 
 First-probe semantics: a pattern-less watch absorbs its first observation as the baseline (no fire), while a pattern watch whose target already matches fires on the first probe — the condition already holds.
 
+## Compatibility
+
+Verified against these harness versions (plugin loads, duty lease is held, web routes answer):
+
+- `0.1.0-rc.8` — 2026-08-20, scratch-profile smoke
+- `0.1.0-rc.7` — 2026-08-20, live web deployment
+
+dsh-sentinel has no runtime dependency on `@deepseek-ai/*` packages. Compatibility here means the cordis loader entries, the `ctx.agents.resume()` followup channel, and the web routes keep working; file an issue if a harness version breaks any of them.
+
 ## Install
+
 
 One line through the official bundle channel:
 
