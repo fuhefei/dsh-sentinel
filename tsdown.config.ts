@@ -94,7 +94,10 @@ export default [
     }],
     outputOptions: {
       entryFileNames: 'client.js',
-      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify('@dsh-external/' + PLUGIN_ID)}, factory: (require) => {`,
+      // The boot graph row is the bare package name; the loader rejects
+      // bundles that register another id. (Leftover '@dsh-external/' scope
+      // from before the v0.11.0 bare-name publish broke client loading.)
+      banner: `window.__ModuleLoader__.load({ id: ${JSON.stringify(PLUGIN_ID)}, factory: (require) => {`,
       footer: 'return module.exports; } });',
       intro: 'var module = { exports: {} }; var exports = module.exports;',
     },
