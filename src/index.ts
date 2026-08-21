@@ -1583,7 +1583,12 @@ export function apply(ctx: ContextLike, config: Config = DEFAULT_CONFIG): void {
 
     return () => {
       stopping = true
-      stopRoutes()
+      // DSH's vendored cordis returns a thenable fiber from ctx.inject, not
+      // an upstream-cordis disposer — calling it throws "stopRoutes is not a
+      // function" at teardown (and skips the rest of this disposer). The
+      // injected fiber auto-disposes through this effect's chain; call the
+      // return value only on hosts where it really is a disposer.
+      if (typeof stopRoutes === 'function') stopRoutes()
       stopCreated()
       runtime.dispose()
     }
