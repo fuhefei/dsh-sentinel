@@ -77,7 +77,7 @@ First-probe semantics: a pattern-less watch absorbs its first observation as the
 
 Verified against these harness versions (plugin loads, duty lease is held, web routes answer):
 
-- `0.1.1-rc.2` — 2026-08-26, build and full test suite against the published 0.1.1-rc.2 packages (runtime smoke pending)
+- `0.1.1-rc.2` — 2026-08-26, source-build smoke: git install into a web profile, duty lease held, state and dashboard routes answer
 - `0.1.0-rc.8` — 2026-08-20, scratch-profile smoke
 - `0.1.0-rc.7` — 2026-08-20, live web deployment
 
