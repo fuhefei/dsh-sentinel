@@ -153,12 +153,13 @@ interface ContextLike {
   on(event: string, callback: (...args: never[]) => void): () => void
   /** Cordis dynamic injection: runs the callback once every listed service is
    * published; never runs (and does not block activation) when one is absent. */
-  inject(deps: string[], callback: (ctx: ContextLike) => void): () => void
+  inject(deps: string[], callback: (ctx: ContextLike) => void): unknown
+  get?(service: string): unknown
   readonly logger: { warn(message: string): void }
   readonly agents: {
     roots(): AgentLike[]
     get(id: string): AgentLike | undefined
-    resume(options: { resumeSessionId: string; agentOptions?: Record<string, unknown> }): Promise<{ agent: AgentLike; dispose(): void | Promise<void> }>
+    resume(options: { resumeSessionId: string; agentOptions?: Record<string, unknown>; setup?: (ctx: unknown) => void | Promise<void> }): Promise<{ agent: AgentLike; dispose(): void | Promise<void> }>
   }
   readonly agentDefaultModel: {
     currentSelection(): { provider: string; model: string }
@@ -604,6 +605,23 @@ class SentinelRuntime {
           const handle = await this.ctx.agents.resume({
             resumeSessionId: sessionId,
             agentOptions: { provider, model },
+            setup: async (agentCtx) => {
+              const presets = this.ctx.get?.('agentPresets') as { mount?: (ctx: unknown, presetId?: string) => void | Promise<void> } | undefined
+              if (presets?.mount === undefined) return
+              let presetId: string | undefined
+              const persistence = this.ctx.get?.('sessionPersistence') as { inspect?: (id: string) => Promise<{ events?: Array<{ type?: string; data?: { agentPreset?: string } }>; meta?: { agentPreset?: string } } | undefined> } | undefined
+              const inspected = await persistence?.inspect?.(sessionId)
+              const events = inspected?.events ?? []
+              for (let i = events.length - 1; i >= 0; i -= 1) {
+                const event = events[i]
+                if (event?.type === 'agent-preset/selected') {
+                  presetId = event.data?.agentPreset
+                  break
+                }
+              }
+              if (presetId === undefined) presetId = inspected?.meta?.agentPreset
+              await presets.mount(agentCtx, presetId)
+            },
           })
           this.handles.push(handle)
           return handle.agent
@@ -1583,7 +1601,7 @@ export function apply(ctx: ContextLike, config: Config = DEFAULT_CONFIG): void {
 
     return () => {
       stopping = true
-      stopRoutes()
+      if (typeof stopRoutes === 'function') stopRoutes()
       stopCreated()
       runtime.dispose()
     }
