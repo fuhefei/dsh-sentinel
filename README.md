@@ -77,6 +77,7 @@ First-probe semantics: a pattern-less watch absorbs its first observation as the
 
 Verified against these harness versions (plugin loads, duty lease is held, web routes answer):
 
+- `0.1.5-alpha.2` — 2026-09-09, temporary web-profile smoke: Node plugin load, duty lease, state/dashboard routes, and the browser plugin bundle all worked with no browser-console errors; `conversation.input.dock` remains a supported session-scoped list slot, and the plugin sidecar is unaffected by the Session V3 migration
 - `0.1.1-rc.2` — 2026-08-26, source-build smoke: git install into a web profile, duty lease held, state and dashboard routes answer
 - `0.1.0-rc.8` — 2026-08-20, scratch-profile smoke
 - `0.1.0-rc.7` — 2026-08-20, live web deployment

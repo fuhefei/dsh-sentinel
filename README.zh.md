@@ -77,6 +77,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）：
 
+- `0.1.5-alpha.2` —— 2026-09-09，临时 web profile 实测：Node 插件加载、duty 租约、state/dashboard 路由和浏览器插件 bundle 均正常，浏览器控制台无报错；`conversation.input.dock` 仍是有效的会话级 list slot，插件 sidecar 不受 Session V3 迁移影响
 - `0.1.1-rc.2` —— 2026-08-26，源码构建冒烟：git 装入 web profile，duty 租约持有，state 与 dashboard 路由应答正常
 - `0.1.0-rc.8` —— 2026-08-20，scratch profile 冒烟
 - `0.1.0-rc.7` —— 2026-08-20，正式 web 部署
