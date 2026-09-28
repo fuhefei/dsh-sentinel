@@ -10,6 +10,7 @@ import { apply, CANCEL_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } 
 
 function makeHarness(resumable: string[] = [], options: { headless?: boolean } = {}) {
   const followups: string[] = []
+  const followupSources: unknown[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const tools: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
   const cleanups: Array<() => void> = []
@@ -48,8 +49,10 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
       id,
       status: 'idle',
       followup(message: unknown) {
-        const blocks = (message as { content?: Array<{ text?: string }> }).content ?? []
+        const envelope = message as { content?: Array<{ text?: string }>; source?: unknown }
+        const blocks = envelope.content ?? []
         followups.push(blocks.map(block => block.text ?? '').join(''))
+        followupSources.push(envelope.source)
       },
       ctx: makeCtx(),
     }
@@ -90,7 +93,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
     return () => {}
   }
 
-  return { agent, followups, tools, routes, cleanups, rootCtx, live, resumeCalls, emit }
+  return { agent, followups, followupSources, tools, routes, cleanups, rootCtx, live, resumeCalls, emit }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -166,6 +169,9 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(wakeup).toContain('watch-1')
     expect(wakeup).toContain('触发后继续部署流程')
     expect(wakeup).toContain('最后一次触发')
+    // Session format v4 admits producer-owned source kinds only; the retired
+    // bare `plugin` pair aborts the turn at the durability boundary.
+    expect(harness.followupSources[0]).toEqual({ kind: 'plugin:dsh-sentinel' })
   }, 30_000)
 
   it('folds durable subscriptions back to life across a server restart', async () => {

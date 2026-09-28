@@ -10,6 +10,7 @@ declare module '@deepseek-ai/dsh-tools' {
 declare module '@deepseek-ai/dsh-llm' {
   export function createUserMessage(init: {
     content: Array<{ type: 'text'; text: string }>
-    source: { kind: 'plugin'; plugin: string }
+    // Session format v4 admits producer-owned kinds only: a plugin owns `plugin:<name>`.
+    source: { kind: `plugin:${string}` }
   }): unknown
 }
