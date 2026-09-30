@@ -32,6 +32,9 @@ import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promis
 import { homedir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
+import type { Context } from '@deepseek-ai/cordis'
+import type { ModelSelection, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import {
@@ -165,15 +168,15 @@ interface ContextLike {
   /** Cordis dynamic injection: runs the callback once every listed service is
    * published; never runs (and does not block activation) when one is absent. */
   inject(deps: string[], callback: (ctx: ContextLike) => void): unknown
-  get?(service: string): unknown
+  get?: Context['get']
   readonly logger: { warn(message: string): void }
   readonly agents: {
     roots(): AgentLike[]
     get(id: string): AgentLike | undefined
-    resume(options: { resumeSessionId: string; agentOptions?: Record<string, unknown>; setup?: (ctx: unknown) => void | Promise<void> }): Promise<{ agent: AgentLike; dispose(): void | Promise<void> }>
+    resume(options: ResumeAgentOptions): Promise<{ agent: AgentLike; dispose(): void | Promise<void> }>
   }
   readonly agentDefaultModel: {
-    currentSelection(): { provider: string; model: string }
+    currentSelection(): ModelSelection
   }
   readonly tools: { register(definition: unknown): () => void }
   readonly webServer?: {
@@ -296,6 +299,10 @@ class SentinelRuntime {
   private readonly resumes = new Map<string, Promise<AgentLike>>()
   private readonly handles: Array<{ dispose(): void | Promise<void> }> = []
   private timer: ReturnType<typeof setInterval> | undefined
+  private readonly dutyLeasePath = leasePath()
+  private readonly pendingRounds = new Set<Promise<void>>()
+  private ready = false
+  private activeDrive: Promise<void> | undefined
   private disposed = false
   /** This process owns probing/delivery. False while another instance's lease is fresh. */
   private duty = false
@@ -307,12 +314,24 @@ class SentinelRuntime {
   ) {}
 
   start(): void {
-    this.timer = setInterval(() => { void this.drive() }, this.config.heartbeatMs)
-    // Headless profiles exit when the prompt completes: the heartbeat must not
-    // hold the event loop open there. Web mode stays up on the server's own
-    // handles; subscriptions survive either way through the sidecar log.
-    this.timer.unref()
-    void this.claimDuty().then(() => { void this.loadPersisted() })
+    this.trackRound((async () => {
+      await this.claimDuty()
+      this.ready = true
+      await this.loadPersisted()
+      if (this.disposed) return
+      this.timer = setInterval(() => {
+        if (this.pendingRounds.size === 0) this.trackRound(this.drive())
+      }, this.config.heartbeatMs)
+      // One-shot profiles must not stay alive solely for the sentinel heartbeat.
+      this.timer.unref()
+    })())
+  }
+
+  /** Keep startup and heartbeat file operations owned until teardown completes. */
+  private trackRound(round: Promise<void>): void {
+    const settled = round.finally(() => { this.pendingRounds.delete(settled) })
+    this.pendingRounds.add(settled)
+    void settled
   }
 
   /**
@@ -355,7 +374,7 @@ class SentinelRuntime {
 
   private async readLease(): Promise<{ pid: number; at: number } | undefined> {
     try {
-      const parsed = JSON.parse(await readFile(leasePath(), 'utf8')) as { pid?: unknown; at?: unknown }
+      const parsed = JSON.parse(await readFile(this.dutyLeasePath, 'utf8')) as { pid?: unknown; at?: unknown }
       if (typeof parsed.pid !== 'number' || typeof parsed.at !== 'number') return undefined
       return { pid: parsed.pid, at: parsed.at }
     } catch {
@@ -364,7 +383,7 @@ class SentinelRuntime {
   }
 
   private async writeLease(): Promise<void> {
-    const path = leasePath()
+    const path = this.dutyLeasePath
     const tmp = `${path}.tmp`
     await mkdir(dirname(path), { recursive: true })
     await writeFile(tmp, JSON.stringify({ pid: process.pid, at: Date.now() }), 'utf8')
@@ -390,14 +409,16 @@ class SentinelRuntime {
     return port === undefined ? path : `http://localhost:${String(port)}${path}`
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.disposed = true
     if (this.timer !== undefined) clearInterval(this.timer)
-    if (this.duty) void unlink(leasePath()).catch(() => {})
     for (const watch of this.watches.values()) watch.closeSensors()
+    await Promise.all(this.pendingRounds)
+    await this.activeDrive
+    if (this.duty) await unlink(this.dutyLeasePath).catch(() => {})
     this.watches.clear()
     for (const handle of this.handles.splice(0, this.handles.length)) {
-      void Promise.resolve().then(() => handle.dispose()).catch(() => {})
+      await Promise.resolve().then(() => handle.dispose()).catch(() => {})
     }
   }
 
@@ -424,7 +445,7 @@ class SentinelRuntime {
       }
     }
     this.compact(totalRows)
-    void this.drive()
+    await this.drive()
   }
 
   /** Crash-window recovery: fires logged after the latest delivered watermark
@@ -612,25 +633,16 @@ class SentinelRuntime {
     if (pending === undefined) {
       pending = (async () => {
         try {
-          const { provider, model } = this.ctx.agentDefaultModel.currentSelection()
+          const selection = this.ctx.agentDefaultModel.currentSelection()
           const handle = await this.ctx.agents.resume({
-            resumeSessionId: sessionId,
-            agentOptions: { provider, model },
-            setup: async (agentCtx) => {
-              const presets = this.ctx.get?.('agentPresets') as { mount?: (ctx: unknown, presetId?: string) => void | Promise<void> } | undefined
-              if (presets?.mount === undefined) return
-              let presetId: string | undefined
-              const persistence = this.ctx.get?.('sessionPersistence') as { inspect?: (id: string) => Promise<{ events?: Array<{ type?: string; data?: { agentPreset?: string } }>; meta?: { agentPreset?: string } } | undefined> } | undefined
-              const inspected = await persistence?.inspect?.(sessionId)
-              const events = inspected?.events ?? []
-              for (let i = events.length - 1; i >= 0; i -= 1) {
-                const event = events[i]
-                if (event?.type === 'agent-preset/selected') {
-                  presetId = event.data?.agentPreset
-                  break
-                }
-              }
-              if (presetId === undefined) presetId = inspected?.meta?.agentPreset
+            resumeSessionId: sessionId as ResumeAgentOptions['resumeSessionId'],
+            agentOptions: { ...selection },
+            setup: async (agentCtx, agent) => {
+              const presets = this.ctx.get?.('agentPresets')
+              if (presets === undefined) return
+              const projections = this.ctx.get?.('sessionProjections')
+              if (projections === undefined) throw new Error('dsh-sentinel: agentPresets requires sessionProjections to restore the saved preset')
+              const presetId = projections.stateOf(agent.session, 'agentPreset') ?? undefined
               await presets.mount(agentCtx, presetId)
             },
           })
@@ -695,6 +707,18 @@ class SentinelRuntime {
    * after the batches settle.
    */
   private async drive(): Promise<void> {
+    if (this.disposed || !this.ready) return
+    if (this.activeDrive !== undefined) return this.activeDrive
+    const round = this.driveRound()
+    this.activeDrive = round
+    try {
+      await round
+    } finally {
+      this.activeDrive = undefined
+    }
+  }
+
+  private async driveRound(): Promise<void> {
     if (this.disposed) return
     if (this.duty) {
       await this.renewLease()
@@ -1610,11 +1634,11 @@ export function apply(ctx: ContextLike, config: Config = DEFAULT_CONFIG): void {
 
     runtime.start()
 
-    return () => {
+    return async () => {
       stopping = true
       if (typeof stopRoutes === 'function') stopRoutes()
       stopCreated()
-      runtime.dispose()
+      await runtime.dispose()
     }
   }, `${PLUGIN_ID}.lifecycle()`)
 }

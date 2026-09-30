@@ -3,21 +3,23 @@ import { createServer as createNetServer } from 'node:net'
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { apply, CANCEL_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
-function makeHarness(resumable: string[] = [], options: { headless?: boolean } = {}) {
+function makeHarness(resumable: string[] = [], options: { headless?: boolean; savedPreset?: string; reasoningEffort?: string } = {}) {
   const followups: string[] = []
   // The wakeup's message-source attribution: 0.1.7 dropped the shared
   // `plugin` kind, so the contract we must hold is our own declared kind.
   const sources: unknown[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const tools: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
-  const cleanups: Array<() => void> = []
+  const cleanups: Array<() => void | Promise<void>> = []
   const live = new Map<string, ReturnType<typeof buildAgent>>()
   const resumeCalls: string[] = []
+  const resumedOptions: Array<Record<string, unknown> | undefined> = []
+  const mountedPresets: Array<string | undefined> = []
 
   function emit(event: string, arg: unknown): void {
     for (const callback of listeners.get(event) ?? []) callback(arg)
@@ -25,7 +27,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
 
   function makeCtx() {
     return {
-      effect(body: () => () => void) {
+      effect(body: () => () => void | Promise<void>) {
         const cleanup = body()
         cleanups.push(cleanup)
         return cleanup
@@ -49,6 +51,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
   function buildAgent(id: string) {
     return {
       id,
+      session: { id },
       status: 'idle',
       followup(message: unknown) {
         const blocks = (message as { content?: Array<{ text?: string }> }).content ?? []
@@ -65,20 +68,31 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
   const routes: Array<{ path: string; handler: (req: unknown, res: unknown) => void }> = []
   const rootCtx: Record<string, unknown> = {
     ...makeCtx(),
-    agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat' }) },
+    agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat', ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) }) },
     agents: {
       roots: () => [...live.values()],
       get: (id: string) => live.get(id),
-      async resume({ resumeSessionId }: { resumeSessionId: string }) {
+      async resume({ resumeSessionId, agentOptions, setup }: { resumeSessionId: string; agentOptions?: Record<string, unknown>; setup?: (ctx: unknown, agent: unknown) => Promise<void> }) {
         resumeCalls.push(resumeSessionId)
+        resumedOptions.push(agentOptions)
         if (!resumable.includes(resumeSessionId)) throw new Error(`no persisted session "${resumeSessionId}"`)
         const resumed = buildAgent(resumeSessionId)
+        await setup?.(resumed.ctx, resumed)
         live.set(resumeSessionId, resumed)
         emit('agent/created', { agent: resumed })
         return { agent: resumed, dispose: () => { live.delete(resumeSessionId) } }
       },
     },
   }
+  const services: Record<string, unknown> = options.savedPreset === undefined ? {} : {
+    agentPresets: { mount: async (_ctx: unknown, presetId?: string) => { mountedPresets.push(presetId ?? 'current-default') } },
+    sessionProjections: { stateOf: (session: { id: string }, key: string) => {
+      expect(session.id).toBe('session-e2e')
+      expect(key).toBe('agentPreset')
+      return options.savedPreset
+    } },
+  }
+  rootCtx['get'] = (name: string) => services[name]
   if (options.headless !== true) {
     rootCtx['webServer'] = {
       port: 3080,
@@ -94,7 +108,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
     return () => {}
   }
 
-  return { agent, followups, sources, tools, routes, cleanups, rootCtx, live, resumeCalls, emit }
+  return { agent, followups, sources, tools, routes, cleanups, rootCtx, live, resumeCalls, resumedOptions, mountedPresets, emit }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -110,9 +124,10 @@ describe('sentinel end-to-end (in-process)', () => {
   const dirs: string[] = []
   const harnesses: Array<ReturnType<typeof makeHarness>> = []
   const originalHome = process.env['DSH_HOME']
-  afterAll(async () => {
-    for (const harness of harnesses) for (const cleanup of harness.cleanups.splice(0, harness.cleanups.length)) cleanup()
+  afterEach(async () => {
+    for (const harness of harnesses.splice(0)) for (const cleanup of harness.cleanups.splice(0)) await cleanup()
     await Promise.all(dirs.map(dir => rm(dir, { recursive: true, force: true })))
+    dirs.length = 0
     if (originalHome === undefined) delete process.env['DSH_HOME']
     else process.env['DSH_HOME'] = originalHome
   })
@@ -123,6 +138,57 @@ describe('sentinel end-to-end (in-process)', () => {
     process.env['DSH_HOME'] = dir
     return dir
   }
+
+  it('finishes an in-flight duty claim before disposal returns', async () => {
+    const dir = await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never)
+    for (const cleanup of harness.cleanups.splice(0)) await cleanup()
+    await expect(readFile(join(dir, 'sentinel.lease'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('keeps the duty lease in the runtime home when DSH_HOME changes', async () => {
+    const original = await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 50 })
+    await sleep(250)
+    const other = await freshHome()
+    await sleep(100)
+    for (const cleanup of harness.cleanups.splice(0)) await cleanup()
+    await expect(readFile(join(other, 'sentinel.lease'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(original, 'sentinel.lease'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each(['preset', 'reasoning', 'preset-free composition'] as const)('preserves %s when a watch resumes a dormant session', async (field) => {
+    await freshHome()
+    const harness = makeHarness(['session-e2e'], { ...(field === 'preset-free composition' ? {} : { savedPreset: 'historical-preset' }), reasoningEffort: 'high' })
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(250)
+    const tool = harness.tools.find(tool => tool.name === 'sentinel_watch')!
+    await tool.execute({ kind: 'webhook', target: 'resume-test', note: 'resume saved composition', max_fires: 1 }, {})
+    harness.live.clear()
+    const hook = harness.routes.find(route => route.path === HOOK_PATH)!
+    await new Promise<void>(resolve => {
+      const data: Array<(chunk?: unknown) => void> = []
+      const ends: Array<(chunk?: unknown) => void> = []
+      void hook.handler({
+        method: 'POST', url: `${HOOK_PATH}?id=watch-1&s=session-e2e`,
+        on(event: string, callback: (chunk?: unknown) => void) { (event === 'data' ? data : ends).push(callback) },
+      }, { writeHead() {}, end() { resolve() } })
+      for (const listener of data) listener('ready')
+      for (const listener of ends) listener()
+    })
+    await expect.poll(() => harness.followups.length).toBe(1)
+    if (field === 'preset') expect(harness.mountedPresets).toEqual(['historical-preset'])
+    else {
+      expect(harness.resumedOptions[0]).toEqual({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })
+      if (field === 'preset-free composition') expect(harness.mountedPresets).toEqual([])
+    }
+  })
 
   it('registers the tools, records sidecar changes, probes, and wakes the agent', async () => {
     await freshHome()
@@ -189,7 +255,7 @@ describe('sentinel end-to-end (in-process)', () => {
       note: 'restart resilience check',
       max_fires: 3,
     }, {})
-    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) cleanup()
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) await cleanup()
 
     // Same DSH_HOME, fresh process: the sidecar log is the only carrier.
     const second = makeHarness()
@@ -278,7 +344,7 @@ describe('sentinel end-to-end (in-process)', () => {
     expect((await storeLines()).filter(row => row.change.change === 'baseline').length).toBe(1)
 
     // Server restart with NO live agent: the session is fully dormant.
-    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) cleanup()
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) await cleanup()
     const second = makeHarness(['session-e2e'])
     harnesses.push(second)
     second.live.clear()
@@ -708,7 +774,7 @@ describe('sentinel end-to-end (in-process)', () => {
     await writeFile(flag, 'deploy ready')
     await sleep(7000)
     expect(first.followups.length).toBe(0)
-    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) cleanup()
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) await cleanup()
 
     // Second process, same DSH_HOME: boot requeues the fire and delivers it.
     const second = makeHarness(['session-e2e'])
@@ -756,7 +822,7 @@ describe('sentinel end-to-end (in-process)', () => {
 
     // Owner exits (lease released): the passive instance takes over within a
     // heartbeat and now probes and delivers itself.
-    for (const cleanup of owner.cleanups.splice(0, owner.cleanups.length)) cleanup()
+    for (const cleanup of owner.cleanups.splice(0, owner.cleanups.length)) await cleanup()
     await sleep(1000)
     const dir = await mkdtemp(join(tmpdir(), 'sentinel-lease-'))
     dirs.push(dir)
@@ -787,6 +853,7 @@ describe('sentinel end-to-end (in-process)', () => {
     const harness = makeHarness()
     harnesses.push(harness)
     apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 500, notifyWebhookUrl: `http://127.0.0.1:${String(port)}/hook` })
+    harness.cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())))
     harness.emit('agent/created', { agent: harness.agent })
     await sleep(400)
 
@@ -796,14 +863,11 @@ describe('sentinel end-to-end (in-process)', () => {
     const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
     if (watchTool === undefined) throw new Error('watch tool missing')
     await watchTool.execute({ kind: 'file', target: flag, interval_seconds: 5, note: 'notify fanout', max_fires: 1 }, {})
-    await sleep(1200)
+    await expect.poll(async () => (await storeLines()).filter(row => row.change.change === 'baseline').length).toBe(1)
     await writeFile(flag, 'go')
-    await sleep(2500)
-
-    expect(received.length).toBe(1)
+    await expect.poll(() => received.length, { timeout: 5000 }).toBe(1)
     expect(received[0]?.['event']).toBe('fired')
     expect(received[0]?.['id']).toBe('watch-1')
     expect(received[0]?.['summary']).toContain('快照')
-    await new Promise<void>(resolve => server.close(() => resolve()))
   }, 20_000)
 })
