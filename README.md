@@ -16,11 +16,9 @@ One duty owner per `$DSH_HOME`: a lease file (`sentinel.lease`) makes the first 
 
 The browser half is a dock card above the composer (the `conversation.input.dock` family) listing the session's active watches — sensor, target, live probe state, fire budget, next-probe countdown — plus recent fire history when expanded. It polls the read-only state route and renders nothing when the session has no watches.
 
-Two surfaces make the server-global watch set visible. A sidebar branch grows under every session row that has active watches (`sidebar.workspaces.sessionRow.branch`, one shared poller for all rows) — collapsed it is a `👁` count, expanded it lists the session's watches and links to the dashboard. The dashboard is a standalone table of every watch across every session: session (active/dormant), sensor, target, pattern, fire budget, last probe state, next probe.
+Two surfaces make the server-global watch set visible. A **Sentinel entry in the sidebar's global panel list** (`sidebar.panellist`, id `sentinel`) opens the watch table in the central column (`main`, the same id) — its glyph carries a state dot while any watch is active. The dashboard is a standalone table of every watch across every session: session (active/dormant), sensor, target, pattern, fire budget, last probe state, next probe.
 
-| Sidebar branch | Global dashboard |
-| --- | --- |
-| ![Sidebar branch](docs/preview/sentinel-sidebar-branch.png) | ![Dashboard](docs/preview/sentinel-dashboard.png) |
+![Global dashboard](docs/preview/sentinel-dashboard.png)
 
 ## Sensors
 
@@ -65,7 +63,7 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 
 ## Routes
 
-- `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar branch (omit `sessionId` for every session).
+- `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar panel (omit `sessionId` for every session).
 - `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
@@ -77,12 +75,14 @@ First-probe semantics: a pattern-less watch absorbs its first observation as the
 
 Verified against these harness versions (plugin loads, duty lease is held, web routes answer):
 
+- `0.1.7-rc.2` — 2026-09-29, clean-profile upgrade rehearsal against a copy of the live profile: 0.1.7 removed the shared catch-all `plugin` message-source kind (every producer now declares its own), so a wakeup carries `{ kind: 'sentinel' }` — same `context` placement in the transcript, and it renders as "Sentinel" on both lines. The harness dependency range was also re-pinned to the 0.1.7 line, because under strict semver `>=0.1.5-rc.2 <0.2.0` does **not** admit `0.1.7-rc.2` (the prerelease rule); left alone, a 0.1.7 host would have resolved this plugin's harness imports to 0.1.5 copies — the exact drift the 0.1.5 alignment removed. Verified: `pnpm typecheck` and all 63 tests pass, the plugin activates and holds the duty lease, the web routes answer, and the served client bundle carries `sidebar.panellist` (65 boot rows)
+- `0.1.5-rc.2` — 2026-09-15, live web deployment after the 0.1.5 alignment: the plugin's whole runtime import closure resolves to the deployed line (its harness imports are declared dependencies, so a profile's older hoisted copies can no longer shadow them), the client half builds against the real 0.1.5 types with no shims, `pnpm typecheck` and all 63 tests pass, and a live file watch fired through inotify 1s after the change and the wakeup was delivered into the session as a plugin-sourced message; after the restart the deployment serves the new client half (bundle rev changed, `sidebar.panellist` present, 54 boot rows)
 - `0.1.5-alpha.2` — 2026-09-09, temporary web-profile smoke: Node plugin load, duty lease, state/dashboard routes, and the browser plugin bundle all worked with no browser-console errors; `conversation.input.dock` remains a supported session-scoped list slot, and the plugin sidecar is unaffected by the Session V3 migration
 - `0.1.1-rc.2` — 2026-08-26, source-build smoke: git install into a web profile, duty lease held, state and dashboard routes answer
 - `0.1.0-rc.8` — 2026-08-20, scratch-profile smoke
 - `0.1.0-rc.7` — 2026-08-20, live web deployment
 
-dsh-sentinel has no runtime dependency on `@deepseek-ai/*` packages. Compatibility here means the cordis loader entries, the `ctx.agents.resume()` followup channel, and the web routes keep working; file an issue if a harness version breaks any of them.
+Compatibility means the cordis loader entries, the `ctx.agents` followup channel, the declared slot seats, and the web routes keep working; file an issue if a harness version breaks any of them. Its harness imports (`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-scope`) are declared dependencies pinned to the verified line, so the plugin carries aligned copies instead of inheriting whatever a profile's hoisted store happens to hold; `@deepseek-ai/cordis` stays a peer because service identity must come from the running host.
 
 ## Install
 
@@ -110,19 +110,15 @@ Alternatively, add the node half manually through a patch-list configuration ove
 
 The browser half ships in the same package (`./client`) and is injected by the Web UI's plugin loader.
 
-### Sidebar branch prerequisite
+### Sidebar surface (0.1.5 and later)
 
-The dock and the dashboard work on a stock host. The sidebar branch needs the session-row extension holes, which the official tree does not declare yet; apply the bundled patch to your DSH source checkout and rebuild `ui-workspace`:
+The dock, the sidebar entry and the dashboard all work on a stock host: the entry registers into the official `sidebar.panellist` seat and its panel into the layout's `main` slot, with no host patch.
 
-```sh
-git apply /path/to/dsh-sentinel/patches/session-row-holes.patch
-```
-
-The patch declares `sidebar.workspaces.sessionRow` and `sidebar.workspaces.sessionRow.branch` as **list** holes (every registrant renders, in order) at **root** scope (sidebar rows render outside any session binding; the row passes its `sessionId` through owner props). [dsh-subagent-tree](https://github.com/dsh-external/dsh-subagent-tree) ships a patch for the same hole names with different semantics (keyed/session); apply one or the other, not both.
+Through 0.1.2 the global view instead grew a branch under each watched session row, which needed the session-row holes the official tree never declared; that path is retired with `patches/session-row-holes.patch` kept only for those older trees. 0.1.5 dropped the hole, so a plugin built for it must use the panel seat above.
 
 ### better-sidebar integration (optional)
 
-When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed in the same profile, sentinel registers its global watch table as a sidebar tab (`dsh-sentinel:watches`, in the **+** menu) through better-sidebar's documented `ctx.betterSidebar.registerTab` extension surface: every watch server-wide with live probe state, fire budgets and recent fire history, fed by one shared poller. No configuration needed; without better-sidebar the registration is silently skipped and the dock / branch / dashboard keep working as before.
+When [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) is installed in the same profile, sentinel registers its global watch table as a sidebar tab (`dsh-sentinel:watches`, in the **+** menu) through better-sidebar's documented `ctx.betterSidebar.registerTab` extension surface: every watch server-wide with live probe state, fire budgets and recent fire history, fed by one shared poller. No configuration needed; without better-sidebar the registration is silently skipped and the dock / panel / dashboard keep working as before.
 
 ![Sentinel tab inside the better-sidebar workbench](docs/preview/sentinel-better-sidebar-tab.png)
 

@@ -16,11 +16,9 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 浏览器侧是 composer 上方的 dock 卡片（`conversation.input.dock` 族），列出本会话的活跃 watch——传感器、目标、实时探测状态、触发预算、下次探测倒计时——展开还有最近的触发历史。它轮询只读的 state 路由；会话没有 watch 时不渲染任何东西。
 
-两个界面暴露 server 全局的 watch 集合。每条有活跃 watch 的会话行下会长出一个侧边栏分支（`sidebar.workspaces.sessionRow.branch`，所有行共用一个轮询器）：折叠时是 `👁` 计数，展开后列出该会话的 watch 并链到 dashboard。dashboard 是跨所有会话的全量 watch 表：会话（active/dormant）、传感器、目标、pattern、触发预算、最近探测状态、下次探测。
+两个界面暴露 server 全局的 watch 集合。**侧边栏全局面板列表**里多出一个哨兵条目（`sidebar.panellist`，id `sentinel`），点击即在中栏（`main` 同名 key）打开 watch 表——只要有活跃 watch，图标上就带一个状态点。dashboard 是跨所有会话的全量 watch 表：会话（active/dormant）、传感器、目标、pattern、触发预算、最近探测状态、下次探测。
 
-| 侧边栏分支 | 全局 dashboard |
-| --- | --- |
-| ![侧边栏分支](docs/preview/sentinel-sidebar-branch.png) | ![Dashboard](docs/preview/sentinel-dashboard.png) |
+![全局 dashboard](docs/preview/sentinel-dashboard.png)
 
 ## 传感器
 
@@ -65,7 +63,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 ## 路由
 
-- `GET /plugins/dsh-sentinel/state?sessionId=…` — dock 和侧边栏分支用的只读状态（省略 `sessionId` 返回所有会话）。
+- `GET /plugins/dsh-sentinel/state?sessionId=…` — dock 和侧边栏面板用的只读状态（省略 `sessionId` 返回所有会话）。
 - `GET /plugins/dsh-sentinel/dashboard` — server 全局 watch 表。
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook 入口；把一条 `curl` 塞进 CI 任务、git hook 或另一台机器的脚本，就能叫醒 agent。watch id 按会话隔离，`s` 限定符保证两个会话的 `watch-1` hook 不打架（工具直接发完整 URL）。不带 `s` 的 URL 仍可用，解析到第一条匹配的 webhook watch。
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — 手动取消。dashboard 表和每个 UI 行都带 ✕，任何 watch 都能手动停掉——包括会话和 agent 早就不在了的孤儿 watch；host 没有 session-deleted 事件，所以这是最后的兜底开关。
@@ -77,12 +75,14 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）：
 
+- `0.1.7-rc.2` —— 2026-09-29，对线上 profile 的副本做整轮净装升级彩排：0.1.7 删除了共享的兜底 `plugin` 消息来源 kind（改为每个生产者声明自己的），因此唤醒携带 `{ kind: 'sentinel' }`——在会话流里落位同为 `context`，两条版本线上都渲染为 "Sentinel"。harness 依赖范围也重新钉到 0.1.7 线：严格 semver 下 `>=0.1.5-rc.2 <0.2.0` **不包含** `0.1.7-rc.2`（预发布规则），若不改，0.1.7 宿主会把本插件的 harness import 解析到 0.1.5 的副本——正是 0.1.5 对齐时消除掉的那类漂移。实测：`pnpm typecheck` 与全部 63 个测试通过，插件激活并持有 duty 租约，web 路由应答正常，下发的客户端 bundle 含 `sidebar.panellist`（boot 图 65 条）
+- `0.1.5-rc.2` —— 2026-09-15，对齐 0.1.5 后的正式 web 部署实测：插件整条运行时 import 闭包都解析到部署线（harness 依赖改为显式 dependencies，profile 里更旧的 hoisted 副本再也遮不住它们），客户端半侧去掉 shim 后按真实 0.1.5 类型构建，`pnpm typecheck` 与全部 63 个测试通过，线上文件 watch 在改动后 1s 内经 inotify 触发，唤醒作为 plugin 来源的会话消息投递进会话；重启后部署下发的是新的客户端半侧（bundle rev 变更、含 `sidebar.panellist`、boot 图 54 条）
 - `0.1.5-alpha.2` —— 2026-09-09，临时 web profile 实测：Node 插件加载、duty 租约、state/dashboard 路由和浏览器插件 bundle 均正常，浏览器控制台无报错；`conversation.input.dock` 仍是有效的会话级 list slot，插件 sidecar 不受 Session V3 迁移影响
 - `0.1.1-rc.2` —— 2026-08-26，源码构建冒烟：git 装入 web profile，duty 租约持有，state 与 dashboard 路由应答正常
 - `0.1.0-rc.8` —— 2026-08-20，scratch profile 冒烟
 - `0.1.0-rc.7` —— 2026-08-20，正式 web 部署
 
-dsh-sentinel 不依赖任何 `@deepseek-ai/*` 包。这里的兼容指 cordis loader 条目、`ctx.agents.resume()` 跟进通道和 web 路由持续可用；若某版本破坏了其中任一环节，请提 issue。
+这里的兼容指 cordis loader 条目、`ctx.agents` 跟进通道、所声明的 slot 座位和 web 路由持续可用；若某版本破坏了其中任一环节，请提 issue。插件的 harness 依赖（`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-scope`）是钉在已验证版本线上的显式 dependencies，插件因此自带对齐副本，而不是继承 profile 里 hoisted store 恰好留下的版本；`@deepseek-ai/cordis` 仍是 peer，因为服务身份必须来自正在运行的宿主。
 
 ## 安装
 
@@ -110,19 +110,15 @@ dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.11.0"
 
 浏览器半边在同一个包里（`./client`），由 Web UI 的插件加载器注入。
 
-### 侧边栏分支的前置条件
+### 侧边栏界面（0.1.5 及以后）
 
-dock 和 dashboard 在原版 host 上就能用。侧边栏分支需要会话行的扩展洞（extension holes），官方树还没声明；给你的 DSH 源码 checkout 打上附带补丁并重建 `ui-workspace`：
+dock、侧边栏条目和 dashboard 在原版 host 上都能用：条目注册进官方 `sidebar.panellist` 座位，面板注册进布局的 `main` slot，无需给宿主打任何补丁。
 
-```sh
-git apply /path/to/dsh-sentinel/patches/session-row-holes.patch
-```
-
-补丁把 `sidebar.workspaces.sessionRow` 和 `sidebar.workspaces.sessionRow.branch` 声明为 **root** 作用域的 **list** 洞（所有注册者按序渲染；侧边栏行渲染在任何 session 绑定之外，行通过 owner props 传递 `sessionId`）。[dsh-subagent-tree](https://github.com/dsh-external/dsh-subagent-tree) 对同名洞提供语义不同的补丁（keyed/session）；二选一，不要同时打。
+在 0.1.2 及更早版本里，全局视图改而长在每条被监视会话行下方，需要官方树从未声明过的会话行扩展洞；该路径已退役，`patches/session-row-holes.patch` 只为那些旧树保留。0.1.5 起旧洞已不存在，面向它的插件必须改用上面的面板座位。
 
 ### better-sidebar 集成（可选）
 
-同一 profile 里装有 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 时，sentinel 通过它公开的 `ctx.betterSidebar.registerTab` 扩展面，把全局 watch 表注册成一个侧边栏 tab（`dsh-sentinel:watches`，在 **+** 菜单里）：server 上每条 watch 的实时探测状态、触发预算和最近触发历史，由一个共享轮询器供数。无需配置；没装 better-sidebar 时注册静默跳过，dock / 分支 / dashboard 照常工作。
+同一 profile 里装有 [dsh-better-sidebar](https://github.com/omdsh-dev/DSH-better-sidebar) 时，sentinel 通过它公开的 `ctx.betterSidebar.registerTab` 扩展面，把全局 watch 表注册成一个侧边栏 tab（`dsh-sentinel:watches`，在 **+** 菜单里）：server 上每条 watch 的实时探测状态、触发预算和最近触发历史，由一个共享轮询器供数。无需配置；没装 better-sidebar 时注册静默跳过，dock / 面板 / dashboard 照常工作。
 
 ![better-sidebar 工作台里的 sentinel tab](docs/preview/sentinel-better-sidebar-tab.png)
 

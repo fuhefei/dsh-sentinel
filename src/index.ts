@@ -58,6 +58,17 @@ import {
 import { probe, shouldFire } from './sensors.ts'
 import { SentinelStore, type FoldableRow } from './store.ts'
 
+// DSH 0.1.7 removed the shared catch-all `plugin` message-source kind: every
+// producer now declares its own `kind` by merging into `MessageSourceMap`.
+// Declaring ours here compiles against both the 0.1.5 and 0.1.7 type surfaces
+// (the interface exists in both), so the wakeup path needs no version split.
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** A sentinel watch fire delivered as a user-role wakeup. */
+    sentinel: { kind: 'sentinel' }
+  }
+}
+
 export const name = 'dsh-sentinel'
 // webServer is deliberately absent: headless profiles have no web server, and
 // the routes below mount through ctx.inject(['webServer']) instead.
@@ -118,13 +129,6 @@ export const Config: Schema<Config> = Schema.object({
 })
 
 const PLUGIN_ID = 'dsh-sentinel'
-/**
- * Producer-owned source kind for wakeup messages. Session format v4 refuses the
- * retired bare `kind: 'plugin'` pair, and its v3→v4 migration derives exactly
- * this `plugin:<name>` value for rows written by a producer it does not know, so
- * pre- and post-v4 session logs carry one shape.
- */
-const MESSAGE_SOURCE_KIND = `plugin:${PLUGIN_ID}`
 export const STATE_PATH = `/plugins/${PLUGIN_ID}/state`
 export const HOOK_PATH = `/plugins/${PLUGIN_ID}/hook`
 export const CANCEL_PATH = `/plugins/${PLUGIN_ID}/cancel`
@@ -948,7 +952,7 @@ class SentinelRuntime {
     try {
       agent.followup(createUserMessage({
         content: [{ type: 'text', text: batch.join('\n\n---\n\n') }],
-        source: { kind: MESSAGE_SOURCE_KIND },
+        source: { kind: 'sentinel' },
       }))
     } catch (error: unknown) {
       this.warn(`wakeup delivery failed for session "${watch.sessionId}": ${describe(error)}`)

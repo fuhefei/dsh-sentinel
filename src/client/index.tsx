@@ -3,21 +3,23 @@
  * composer (official conversation.input.dock family, same visual language as
  * Goal / To-dos / task-status / loop) showing every active watch of the
  * current session: sensor, target, live probe state, fire budget, next probe
- * countdown — plus the recent fire history when expanded. A sidebar branch
- * under each watched session row (sidebar.workspaces.sessionRow.branch) makes
- * the server-global watch set visible from the workspace tree, with a link to
+ * countdown — plus the recent fire history when expanded. A sidebar entry
+ * (sidebar.panellist, selecting this panel's key in the layout's `main` slot)
+ * opens the server-global watch table in the central column, with a link to
  * the node half's dashboard table. Polls the node half's read-only state
- * route; renders nothing when the session has no watches.
+ * route; the dock renders nothing when the session has no watches.
  */
 import { useEffect, useState } from 'react'
-import type { Context } from 'cordis'
+import type { Context } from '@deepseek-ai/cordis'
 import type { ReactNode } from 'react'
 import { StateDot } from '@deepseek-ai/dsh-client-ui-primitives'
-import type {} from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
-// Type-only: pulls ui-workspace's SlotMap merges for the session-row holes.
-import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+// Type-only: the renderer owns `ctx.slots`, the layout owns the `main` panel
+// slot, and the sidebar owns the global panel list that selects it.
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
+import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -50,7 +52,7 @@ interface BetterSidebarLike {
   registerTab(descriptor: SentinelTabDescriptor): () => void
 }
 
-declare module 'cordis' {
+declare module '@deepseek-ai/cordis' {
   interface Context {
     /** Present only when dsh-better-sidebar's client half is loaded. */
     readonly betterSidebar?: BetterSidebarLike
@@ -72,7 +74,7 @@ const zh = {
   'push': '即时推送',
   'history': '最近触发',
   'nofires': '尚未触发过',
-  'branch': '哨兵 · {count} 个监控',
+  'panel': '哨兵监控',
   'noteLabel': '便签',
   'before': '之前',
   'after': '现在',
@@ -95,7 +97,7 @@ const en = {
   'push': 'live push',
   'history': 'Recent fires',
   'nofires': 'No fires yet',
-  'branch': 'sentinel · {count} watch(es)',
+  'panel': 'Sentinel',
   'noteLabel': 'note',
   'before': 'before',
   'after': 'after',
@@ -470,97 +472,67 @@ export function SentinelDock(
 }
 
 /**
- * Row-below sidebar branch: one instance per session row, fed by the shared
- * global poller. Collapsed it is a single eye-iconed row with the watch count;
- * expanded it lists this session's watches and links to the dashboard table.
- * Renders nothing when the session has no watches, so unwatched rows are
- * untouched.
+ * Sidebar global-panel glyph: the icon row the sidebar shell draws for this
+ * plugin (label, hit target, active state and selection belong to the shell).
+ * A dot marks a non-empty watch set so the entry reads as state, not just a
+ * destination.
  */
-export function SentinelBranch(
-  props: PropsRuntime<'sidebar.workspaces.sessionRow.branch'> & PropsLocale<'sentinel'>,
-): ReactNode {
-  const { sessionId, t } = props
+export function SentinelPanelIcon({ size, active }: PropsRuntime<'sidebar.panellist'>): ReactNode {
   const watches = useGlobalWatches()
-  const [open, setOpen] = useState(false)
-  const mine = watches.filter(watch => watch.sessionId === sessionId)
-  if (mine.length === 0) return null
-
   return (
-    <div
-      data-sentinel-branch=""
+    <span
       style={{
-        margin: '0 0 2px 26px',
-        borderLeft: '2px solid var(--dsw-alias-border-l1)',
-        paddingLeft: 10,
-        fontSize: 12,
-        fontFamily: 'system-ui',
-        color: 'var(--dsw-alias-label-caption)',
+        position: 'relative',
+        display: 'inline-flex',
+        color: active ? 'var(--dsw-alias-label-primary)' : 'var(--dsw-alias-label-secondary)',
       }}
     >
-      <div
-        style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '2px 0', cursor: 'pointer' }}
-        onClick={(e) => { e.stopPropagation(); setOpen(value => !value) }}
-      >
-        <span style={{ flex: 'none', display: 'inline-flex', color: 'var(--dsw-alias-label-tertiary)', transition: 'transform .15s ease', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}>
-          <Icon name="chevron" size={10} />
+      <Icon name="eye" size={size} />
+      {watches.length > 0 && (
+        <span style={{ position: 'absolute', right: -3, top: -3, display: 'inline-flex' }}>
+          <StateDot state="ongoing" size={6} />
         </span>
-        <StateDot state="ongoing" size={8} />
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-          <Icon name="eye" size={11} />
-          {t('branch', { count: mine.length })}
-        </span>
-        <a
-          href={DASHBOARD_PATH}
-          target="_blank"
-          rel="noreferrer"
-          onClick={(e) => { e.stopPropagation() }}
-          style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--dsw-alias-label-caption)', textDecoration: 'none' }}
-        >
-          {t('dashboard')}
-        </a>
-      </div>
-      {open && mine.map(watch => (
-        <div
-          key={watch.id}
-          title={watch.pattern !== undefined ? `${watch.target}  /${watch.pattern}/\n${watch.note}` : `${watch.target}\n${watch.note}`}
-          style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '1px 0 1px 16px', minWidth: 0 }}
-        >
-          <span style={{ flex: 'none', width: 16, display: 'inline-flex', justifyContent: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>
-            <Icon name={KIND_ICONS[watch.kind] ?? 'file'} size={11} />
-          </span>
-          <span style={{ flex: 'none' }}>{watch.id}</span>
-          <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {watch.target}
-          </span>
-          <span style={{ flex: 'none', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-            {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)}
-          </span>
-          <CancelButton watch={watch} t={t} />
-        </div>
-      ))}
-    </div>
+      )}
+    </span>
   )
 }
 
 /**
- * better-sidebar tab view: the server-global watch table inside the sidebar
+ * Central-panel body: the server-global watch table behind the sidebar's
+ * Sentinel entry. Replaces the pre-0.1.5 per-session-row branch — 0.1.5
+ * declares no branch hole under session rows, so the cross-session view lives
+ * in the panel its sidebar entry selects.
+ */
+export function SentinelPanel({ t }: PropsRuntime<'main'> & PropsLocale<'sentinel'>): ReactNode {
+  return <SentinelWatchTable t={t} />
+}
+
+/**
+ * better-sidebar tab view: the same table inside that third-party sidebar
  * workbench. better-sidebar's tab contract passes no locale props, so copy
  * falls back to the browser language (their documented guidance for consumer
  * tabs is plain strings / () => string).
  */
 export function SentinelTabView(): ReactNode {
-  const watches = useGlobalWatches()
-  const fires = useGlobalFires()
   const t = (key: SentinelKey, values?: Record<string, unknown>): string => {
     const template = (navigator.language.startsWith('zh') ? zh : en)[key]
     if (values === undefined) return template
     return template.replace(/\{(\w+)\}/g, (match, name: string) =>
       values[name] !== undefined ? String(values[name]) : match)
   }
+  return <SentinelWatchTable t={t} />
+}
+
+/** The global watch table itself, shared by the panel and the better-sidebar tab. */
+function SentinelWatchTable({ t }: {
+  t: (key: SentinelKey, values?: Record<string, unknown>) => string
+}): ReactNode {
+  const watches = useGlobalWatches()
+  const fires = useGlobalFires()
 
   return (
     <div
-      data-sentinel-tab=""
+      data-sentinel-panel=""
       style={{
         height: '100%', overflowY: 'auto', padding: '8px 0',
         fontSize: 13, fontFamily: 'system-ui', color: 'var(--dsw-alias-label-primary-dimmed)',
@@ -619,6 +591,9 @@ export function SentinelTabView(): ReactNode {
   )
 }
 
+/** Identity shared by the sidebar entry and the main panel it selects. */
+const SENTINEL_PANEL = 'sentinel' as MainPanelId
+
 /** Required client services: slot registry and locale dictionaries. betterSidebar
  * stays out of the static inject — on hosts without better-sidebar a missing
  * service would leave this plugin pending and take the whole web boot down.
@@ -627,6 +602,7 @@ export const inject = ['slots', 'locale']
 
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'sentinel: dictionaries')
+  const t = ctx.locale.bind(NS)
   ctx.slots.inject('conversation.input.dock', () =>
     ctx.slots.register({
       name: 'conversation.input.dock',
@@ -634,15 +610,24 @@ export function apply(ctx: Context): void {
       order: 24,
       locale: NS,
     }, SentinelDock))
-  // The branch hole is declared by ui-workspace's browser registration, whose
-  // activation order is not constrained against this plugin; inject runs the
-  // register once the declaration lands (immediately when it already exists).
-  ctx.slots.inject('sidebar.workspaces.sessionRow.branch', () =>
+  // The cross-session view: a sidebar global-panel entry whose id is also the
+  // layout's `main` key, so selecting the row shows this plugin's panel. Both
+  // holes belong to plugins whose activation order is unconstrained against
+  // this one; inject runs each register once the declaration lands.
+  ctx.slots.inject('sidebar.panellist', () =>
     ctx.slots.register({
-      name: 'sidebar.workspaces.sessionRow.branch',
-      id: 'sentinel',
+      name: 'sidebar.panellist',
+      id: SENTINEL_PANEL,
+      order: 24,
+      label: () => t('panel'),
       locale: NS,
-    }, SentinelBranch))
+    }, SentinelPanelIcon))
+  ctx.slots.inject('main', () =>
+    ctx.slots.register({
+      name: 'main',
+      key: SENTINEL_PANEL,
+      locale: NS,
+    }, SentinelPanel))
   // Soft integration with dsh-better-sidebar. betterSidebar stays out of the
   // static inject — a missing service would leave this plugin pending and take
   // the whole web boot down on hosts without better-sidebar. The tab mounts

@@ -19,9 +19,10 @@ either broken once or is one edit away from breaking.
 4. **Delivery is at-least-once.** A fire is logged to the sidecar before
    delivery; the `delivered` watermark lets a restart requeue fires that never
    reached the agent. Consumers must tolerate a duplicate wakeup. The wakeup
-   message carries a producer-owned source kind (`plugin:dsh-sentinel`): session
-   format v4 refuses the retired bare `plugin` pair, and a refused append fails
-   the whole turn without persisting anything.
+   message carries the plugin's own declared source kind (`sentinel`, declared
+   on `MessageSourceMap` in `src/index.ts`): session format v4 refuses the
+   retired bare `plugin` pair, and a refused append fails the whole turn
+   without persisting anything.
 5. **One duty owner per DSH_HOME.** Probing and delivery happen only under the
    lease; passive instances defer and take over when the lease expires.
 6. **The sidecar log is the only carrier of truth.** Memory state is a fold of

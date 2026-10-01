@@ -10,7 +10,9 @@ import { apply, CANCEL_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } 
 
 function makeHarness(resumable: string[] = [], options: { headless?: boolean } = {}) {
   const followups: string[] = []
-  const followupSources: unknown[] = []
+  // The wakeup's message-source attribution: 0.1.7 dropped the shared
+  // `plugin` kind, so the contract we must hold is our own declared kind.
+  const sources: unknown[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const tools: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
   const cleanups: Array<() => void> = []
@@ -49,10 +51,9 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
       id,
       status: 'idle',
       followup(message: unknown) {
-        const envelope = message as { content?: Array<{ text?: string }>; source?: unknown }
-        const blocks = envelope.content ?? []
+        const blocks = (message as { content?: Array<{ text?: string }> }).content ?? []
         followups.push(blocks.map(block => block.text ?? '').join(''))
-        followupSources.push(envelope.source)
+        sources.push((message as { source?: unknown }).source)
       },
       ctx: makeCtx(),
     }
@@ -93,7 +94,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean } =
     return () => {}
   }
 
-  return { agent, followups, followupSources, tools, routes, cleanups, rootCtx, live, resumeCalls, emit }
+  return { agent, followups, sources, tools, routes, cleanups, rootCtx, live, resumeCalls, emit }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -169,9 +170,9 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(wakeup).toContain('watch-1')
     expect(wakeup).toContain('触发后继续部署流程')
     expect(wakeup).toContain('最后一次触发')
-    // Session format v4 admits producer-owned source kinds only; the retired
-    // bare `plugin` pair aborts the turn at the durability boundary.
-    expect(harness.followupSources[0]).toEqual({ kind: 'plugin:dsh-sentinel' })
+    // Attribution contract: the wakeup declares the plugin's own source kind,
+    // never the catch-all `plugin` kind that DSH 0.1.7 removed.
+    expect(harness.sources[0]).toEqual({ kind: 'sentinel' })
   }, 30_000)
 
   it('folds durable subscriptions back to life across a server restart', async () => {
