@@ -21,6 +21,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { createPoller } from './poller.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -150,37 +151,40 @@ interface WireState {
 function useSentinelState(sessionId: string): WireState {
   const [state, setState] = useState<WireState>({ watches: [], recentFires: [] })
   useEffect(() => {
-    let alive = true
-    const poll = async (): Promise<void> => {
-      try {
-        const res = await fetch(`${STATE_PATH}?sessionId=${encodeURIComponent(sessionId)}`, { headers: { accept: 'application/json' } })
+    const poller = createPoller({
+      intervalMs: POLL_MS,
+      run: async (signal) => {
+        const res = await fetch(`${STATE_PATH}?sessionId=${encodeURIComponent(sessionId)}`, {
+          headers: { accept: 'application/json' },
+          signal,
+        })
         if (!res.ok) return
         const data = (await res.json()) as Partial<WireState>
-        if (alive && Array.isArray(data.watches)) {
+        if (Array.isArray(data.watches)) {
           setState({ watches: data.watches, recentFires: Array.isArray(data.recentFires) ? data.recentFires : [] })
         }
-      } catch {
-        // transient network error: keep the previous frame, retry next tick
-      }
-    }
-    void poll()
-    const timer = setInterval(() => { void poll() }, POLL_MS)
-    return () => { alive = false; clearInterval(timer) }
+      },
+      // Transient network errors keep the previous frame; the next tick retries.
+      onError: () => {},
+    })
+    poller.start()
+    return () => { poller.stop() }
   }, [sessionId])
   return state
 }
 
 // Server-global watch set, shared by every sidebar branch instance: one
 // unfiltered state-route poll with reference-counted start/stop, so N watched
-// session rows cost one request per tick, not N.
+// session rows cost one request per tick, not N. The poller also guarantees the
+// shared request is cancelled once the last subscriber leaves.
 let globalWatches: readonly WireWatch[] = []
 let globalFires: readonly WireFire[] = []
 const globalListeners = new Set<() => void>()
-let globalTimer: ReturnType<typeof setInterval> | undefined
 
-async function pollGlobal(): Promise<void> {
-  try {
-    const res = await fetch(STATE_PATH, { headers: { accept: 'application/json' } })
+const globalPoller = createPoller({
+  intervalMs: POLL_MS,
+  run: async (signal) => {
+    const res = await fetch(STATE_PATH, { headers: { accept: 'application/json' }, signal })
     if (!res.ok) return
     const data = (await res.json()) as Partial<WireState>
     if (Array.isArray(data.watches)) {
@@ -188,23 +192,16 @@ async function pollGlobal(): Promise<void> {
       globalFires = Array.isArray(data.recentFires) ? data.recentFires : []
       for (const listener of globalListeners) listener()
     }
-  } catch {
-    // transient network error: keep the previous frame, retry next tick
-  }
-}
+  },
+  onError: () => {},
+})
 
 function subscribeGlobal(listener: () => void): () => void {
   globalListeners.add(listener)
-  if (globalTimer === undefined) {
-    void pollGlobal()
-    globalTimer = setInterval(() => { void pollGlobal() }, POLL_MS)
-  }
+  if (!globalPoller.running) globalPoller.start()
   return () => {
     globalListeners.delete(listener)
-    if (globalListeners.size === 0 && globalTimer !== undefined) {
-      clearInterval(globalTimer)
-      globalTimer = undefined
-    }
+    if (globalListeners.size === 0) globalPoller.stop()
   }
 }
 
