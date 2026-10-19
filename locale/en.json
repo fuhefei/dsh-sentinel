@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Sentinel",
+    "description": "Condition-driven wakeups: file, process, port, command, HTTP and webhook sensors wake the agent when something happens."
+  }
+}

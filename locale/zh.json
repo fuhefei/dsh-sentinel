@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "哨兵",
+    "description": "条件驱动的唤醒：文件、进程、端口、命令、HTTP 与 webhook 传感器在条件成立时叫醒 agent。"
+  }
+}

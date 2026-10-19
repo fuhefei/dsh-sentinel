@@ -75,6 +75,7 @@ First-probe semantics: a pattern-less watch absorbs its first observation as the
 
 Verified against these harness versions (plugin loads, duty lease is held, web routes answer):
 
+- `0.2.1-rc.2` — 2026-10-19, live web deployment upgraded from `0.2.0-rc.2` (clean profile reinstall, launcher backup + tested rollback path kept): the plugin activates, holds the duty lease, serves its client half and answers the state route (71 boot rows, zero skipped bundles, terminal plugin still loaded). No source change was required — against real `0.2.1-rc.2` packages `tsc -b --noEmit` passes, all 76 tests pass, and the rebuilt `lib/` is byte-identical — so 0.13.2 is an alignment release: devDependencies pinned to `0.2.1-rc.2`, a declarative `engines.dsh` of `>=0.2.0-0 <0.3.0`, and the 0.2-generation display metadata (`locale/*.json` + icon) the Plugin Manager reads. Since `0.2.1-alpha.4` the install-time gate decides on `engines.dsh` alone when it is present (checked in the host's `evaluatePluginCompatibility` source), so that field now carries the 0.2-line admission; the peer ranges remain the fallback for older hosts.
 - `0.2.1-alpha.1` — 2026-10-07, rehearsal on a copy of the live profile: the plugin activates, holds the duty lease, serves its client half and answers the state route (68 boot rows). Reaching it needed the peer range widened — see the `0.2.0-rc.2` note below — and the host's version gate was checked directly against `evaluatePluginCompatibility`: the current range admits `0.2.0-rc.2` and `0.2.1-alpha.1` while still refusing `0.2.0-rc.1` and older.
 - `0.2.0-rc.2` — 2026-09-30, runtime and client build dependencies aligned with this release; npm and pnpm lockfiles regenerated. Dormant-session wakeups restore the saved preset from the session projection and preserve the complete default model selection, including reasoning effort. Duty leases stay in the runtime's original home; startup and probe rounds settle before disposal releases the lease. **2026-10-07:** the three harness peers were widened from a single exact version to `>=0.2.0-rc.2 <0.3.0`, so one build serves the whole 0.2 line instead of exactly one release — an exact pin left the plugin uninstallable on the very next 0.2.x, which is what happened going from 0.1.7 to 0.2.0.
 - `0.1.7-rc.2` — 2026-09-29, clean-profile upgrade rehearsal against a copy of the live profile: 0.1.7 removed the shared catch-all `plugin` message-source kind (every producer now declares its own), so a wakeup carries `{ kind: 'sentinel' }` — same `context` placement in the transcript, and it renders as "Sentinel" on both lines. The harness dependency range was also re-pinned to the 0.1.7 line, because under strict semver `>=0.1.5-rc.2 <0.2.0` does **not** admit `0.1.7-rc.2` (the prerelease rule); left alone, a 0.1.7 host would have resolved this plugin's harness imports to 0.1.5 copies — the exact drift the 0.1.5 alignment removed. Verified: `pnpm typecheck` and all 63 tests pass, the plugin activates and holds the duty lease, the web routes answer, and the served client bundle carries `sidebar.panellist` (65 boot rows)
@@ -84,7 +85,7 @@ Verified against these harness versions (plugin loads, duty lease is held, web r
 - `0.1.0-rc.8` — 2026-08-20, scratch-profile smoke
 - `0.1.0-rc.7` — 2026-08-20, live web deployment
 
-Compatibility means the cordis loader entries, the `ctx.agents` followup channel, the declared slot seats, and the web routes keep working; file an issue if a harness version breaks any of them. Its harness imports (`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-scope`) are declared dependencies pinned to the verified line, so the plugin carries aligned copies instead of inheriting whatever a profile's hoisted store happens to hold; `@deepseek-ai/cordis` stays a peer because service identity must come from the running host.
+Compatibility means the cordis loader entries, the `ctx.agents` followup channel, the declared slot seats, and the web routes keep working; file an issue if a harness version breaks any of them. Its harness imports (`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-llm`, `@deepseek-ai/dsh-scope`) are `peerDependencies` plus `devDependencies`: the running host supplies the single instance (a second copy owns a different `TOOL_RUNTIME_SCHEDULER` symbol and breaks real tool calls), while the exact dev pins keep local typecheck/build on the verified line. `@deepseek-ai/cordis` and `react` stay peers, and `engines.dsh` declares the supported host range.
 
 ## Install
 
@@ -98,8 +99,10 @@ dsh plugin --profile web add dsh-sentinel
 Or straight from git (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.11.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.13.2"
 ```
+
+The tag in this example tracks the latest release; older tags pin older host lines, so check the [Releases](https://github.com/fuhefei/dsh-sentinel/releases) page (or drop the tag and follow `main`) before copying into a different dsh version.
 
 Alternatively, add the node half manually through a patch-list configuration over the shipped base:
 

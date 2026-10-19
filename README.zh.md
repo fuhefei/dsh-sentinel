@@ -75,6 +75,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）：
 
+- `0.2.1-rc.2` —— 2026-10-19，线上 web 部署由 `0.2.0-rc.2` 升级后实测（profile 净装、launcher 备份与回滚路径保留）：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 71 条、零跳过 bundle、终端插件仍在）。源码无需改动——对真实 `0.2.1-rc.2` 包运行 `tsc -b --noEmit` 通过、全部 76 个测试通过、重建的 `lib/` 逐字节不变——因此 0.13.2 是对齐版本：devDependencies 钉到 `0.2.1-rc.2`、声明 `engines.dsh` 为 `>=0.2.0-0 <0.3.0`，并补上 0.2 世代的展示元数据（`locale/*.json` + 图标），供插件管理器在不激活插件时读取。自 `0.2.1-alpha.4` 起，安装期版本闸门在声明了 `engines.dsh` 时**只**按它判断（已核对的宿主 `evaluatePluginCompatibility` 源码），因此 0.2 线的准入由这个字段承担；peer 范围仍作为老宿主的回退判断。
 - `0.2.1-alpha.1` —— 2026-10-07，对线上 profile 副本的彩排：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 68 条）。能到这一步需要放宽 peer 范围（见下方 `0.2.0-rc.2`）；并直接调用宿主的 `evaluatePluginCompatibility` 核对了版本闸门：当前范围放行 `0.2.0-rc.2` 与 `0.2.1-alpha.1`，仍拒绝 `0.2.0-rc.1` 及更旧。
 - `0.2.0-rc.2` —— 2026-09-30，运行时和客户端构建依赖对齐到此版本，并重新生成 npm、pnpm 锁文件。休眠会话唤醒时从会话投影恢复原 preset，并完整传递默认模型选择，包括思考强度。值守租约固定在运行时创建时的目录；清理等待启动和探测轮次结束后再释放租约。**2026-10-07 补充：**三个 harness peer 由"精确单一版本"放宽为 `>=0.2.0-rc.2 <0.3.0`，一份构建即可服务整条 0.2 线，而不是只能服务某一个发行版——精确钉版会让插件在紧邻的下一个 0.2.x 上直接装不上，0.1.7 升 0.2.0 时就是这么坏的。
 - `0.1.7-rc.2` —— 2026-09-29，对线上 profile 的副本做整轮净装升级彩排：0.1.7 删除了共享的兜底 `plugin` 消息来源 kind（改为每个生产者声明自己的），因此唤醒携带 `{ kind: 'sentinel' }`——在会话流里落位同为 `context`，两条版本线上都渲染为 "Sentinel"。harness 依赖范围也重新钉到 0.1.7 线：严格 semver 下 `>=0.1.5-rc.2 <0.2.0` **不包含** `0.1.7-rc.2`（预发布规则），若不改，0.1.7 宿主会把本插件的 harness import 解析到 0.1.5 的副本——正是 0.1.5 对齐时消除掉的那类漂移。实测：`pnpm typecheck` 与全部 63 个测试通过，插件激活并持有 duty 租约，web 路由应答正常，下发的客户端 bundle 含 `sidebar.panellist`（boot 图 65 条）
@@ -84,7 +85,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 - `0.1.0-rc.8` —— 2026-08-20，scratch profile 冒烟
 - `0.1.0-rc.7` —— 2026-08-20，正式 web 部署
 
-这里的兼容指 cordis loader 条目、`ctx.agents` 跟进通道、所声明的 slot 座位和 web 路由持续可用；若某版本破坏了其中任一环节，请提 issue。插件的 harness 依赖（`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-scope`）是钉在已验证版本线上的显式 dependencies，插件因此自带对齐副本，而不是继承 profile 里 hoisted store 恰好留下的版本；`@deepseek-ai/cordis` 仍是 peer，因为服务身份必须来自正在运行的宿主。
+这里的兼容指 cordis loader 条目、`ctx.agents` 跟进通道、所声明的 slot 座位和 web 路由持续可用；若某版本破坏了其中任一环节，请提 issue。插件的 harness 依赖（`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-llm`、`@deepseek-ai/dsh-scope`）同时是 `peerDependencies` 与 `devDependencies`：运行时单实例由宿主提供（第二份核心包持有不同的 `TOOL_RUNTIME_SCHEDULER` Symbol，真实工具调用会坏），精确的 dev 钉版则让本地 typecheck/build 停在已验证线上。`@deepseek-ai/cordis` 与 `react` 仍是 peer，支持范围由 `engines.dsh` 声明。
 
 ## 安装
 
@@ -98,8 +99,10 @@ dsh plugin --profile web add dsh-sentinel
 或者直接从 git 装（构建产物直接提交在仓库里，git 源安装不需要跑构建）：
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.11.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.13.2"
 ```
+
+示例里的 tag 会随最新 release 更新；更旧的 tag 钉的是更旧的宿主线，抄进别的 dsh 版本前请先看 [Releases](https://github.com/fuhefei/dsh-sentinel/releases)（或干脆去掉 tag 跟 `main`）。
 
 或者手动加 node 半边：在你现有 base 上叠一层 patch-list 配置：
 
