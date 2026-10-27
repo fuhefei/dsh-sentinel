@@ -38,6 +38,9 @@ either broken once or is one edit away from breaking.
    notes, regexes, matches or protocol fields. Legacy summaries remain readable;
    unknown or ambiguous text must pass through rather than being guessed or
    rewritten. Follow the host's registered fallback chain for custom languages.
-   Dashboard render helpers are embedded in an inline script, so they must be
-   closure-free or receive all dependencies explicitly. Test that script after
-   bundling as well as the initial HTML.
+   Dashboard markup belongs in checked-in HTML templates. Escape scalar slots
+   for text/quoted attributes and accept HTML fragment slots only from the
+   trusted template renderer; never re-evaluate inserted caller data. Browser
+   behavior is a separately built, self-contained TypeScript entry, not inline
+   JavaScript or serialized functions. Test initial HTML, the actual browser
+   asset and packed-package routes independently of the source checkout.

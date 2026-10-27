@@ -67,6 +67,8 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 
 For example, an English UI now shows `Snapshot changed (state: exit 0)` instead of `快照发生变化（状态: exit 0）`, regardless of the server's message language.
 
+The standalone page renders checked-in `templates/*.html` on the server, so its initial tables work without JavaScript. Scalar slots are escaped for HTML text and quoted attributes; fragment slots accept only trusted template-rendered markup. The browser imports the same typed row renderer and templates through a separately built `lib/dashboard.js` asset, loaded with `defer`. There is no executable inline script, function serialization or dependency on the DSH browser boot context. Template imports are embedded at build time; the original templates and compiled browser asset are also shipped in the package.
+
 ## Tools
 
 - `sentinel_watch` — register a watch: `kind`, `target`, optional `pattern`, `interval` (1–3600s, default 30), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `ttl`.
@@ -77,9 +79,10 @@ For example, an English UI now shows `Snapshot changed (state: exit 0)` instead 
 
 - `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar panel (omit `sessionId` for every session).
 - `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
+- `GET /plugins/dsh-sentinel/dashboard.js` — its self-contained browser asset (`HEAD` supported; other methods return 405). Served with JavaScript MIME type, `nosniff` and revalidation rather than immutable caching.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
-- All four routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
+- All routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
 
 First-probe semantics: a pattern-less watch absorbs its first observation as the baseline (no fire), while a pattern watch whose target already matches fires on the first probe — the condition already holds.
 
@@ -147,8 +150,8 @@ Install [dsh-notification](https://github.com/omdsh-dev/dsh-notification) alongs
 
 ```sh
 npm install
-npm run build     # tsc -b + tsdown (lib/index.js, lib/client.js)
-npm test          # vitest: domain fold/normalize, sensors, dashboard escaping, e2e wakeup flow
+npm run build     # tsc -b + tsdown (node, host client and standalone dashboard assets)
+npm test          # vitest: domain, sensors, React lifecycle, templates/browser, packed assets, e2e
 ```
 
 ## License

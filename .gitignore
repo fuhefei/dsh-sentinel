@@ -3,6 +3,7 @@ lib/*
 !lib/index.js
 !lib/client.js
 !lib/client.js.map
+!lib/dashboard.js
 *.tsbuildinfo
 *.bak
 driver*.sh

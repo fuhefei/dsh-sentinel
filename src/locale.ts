@@ -126,7 +126,7 @@ const zh: Record<keyof typeof en, string> = {
 export const messages = { en, zh }
 export type MessageKey = keyof typeof en
 
-/** Self-contained factory: the standalone dashboard embeds this same code and dictionary. */
+/** Shared typed formatters, imported normally by the server, React client and standalone dashboard. */
 export function createPresentation(locale: Locale, dictionary: Readonly<Record<MessageKey, string>>) {
   /** Callback replacement preserves literal dollar signs and does not re-interpolate values. */
   function translate(key: MessageKey, values: Readonly<Record<string, string | number>> = {}): string {

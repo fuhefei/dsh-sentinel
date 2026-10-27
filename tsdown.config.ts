@@ -1,8 +1,8 @@
 /**
  * Standalone tsdown config for the dsh-sentinel external plugin: node half as
- * plain ESM for the host Loader, browser half as one CJS closure bundle whose
- * externals are exactly the platform seed modules (adapted from the
- * dsh-focus-chat build, the community-standard external client build).
+ * plain ESM for the host Loader, host browser half as one CJS closure bundle
+ * whose externals are the platform seed modules, and the standalone dashboard
+ * as a self-contained IIFE. HTML templates are imported as build-time text.
  */
 import { readFile } from 'node:fs/promises'
 import { basename, dirname, resolve as resolvePath } from 'node:path'
@@ -25,6 +25,24 @@ const EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 
+/** Import checked-in HTML templates as build-time text; no template loader is needed at runtime. */
+function htmlTemplates() {
+  const prefix = '\0sentinel-html:'
+  return {
+    name: 'sentinel-html-templates',
+    resolveId(source: string, importer: string | undefined) {
+      if (!source.endsWith('.html?raw')) return null
+      return prefix + resolvePath(importer === undefined ? process.cwd() : dirname(importer), source.slice(0, -4))
+    },
+    async load(this: { addWatchFile(path: string): void }, id: string) {
+      if (!id.startsWith(prefix)) return null
+      const path = id.slice(prefix.length)
+      this.addWatchFile(path)
+      return `export default ${JSON.stringify(await readFile(path, 'utf8'))};`
+    },
+  }
+}
+
 export default [
   {
     name: `${PLUGIN_ID}/node`,
@@ -40,6 +58,19 @@ export default [
     // convention): `dsh plugin add` installs plugins where the host's own
     // packages resolve, so external users need zero npm installs.
     external: [/^@deepseek-ai\//, 'cordis'],
+    plugins: [htmlTemplates()],
+  },
+  {
+    name: `${PLUGIN_ID}/dashboard`,
+    entry: { dashboard: 'src/dashboard-entry.ts' },
+    outDir: 'lib',
+    format: 'iife',
+    platform: 'browser',
+    target: 'es2022',
+    dts: false,
+    clean: false,
+    plugins: [htmlTemplates()],
+    outputOptions: { entryFileNames: 'dashboard.js' },
   },
   {
     name: `${PLUGIN_ID}/client`,

@@ -1,4 +1,3 @@
-import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
 import { createPresentation, formatFireSummary, localizeState, messages, negotiateLocale, resolveLocale, translate, type FireMessage } from '../src/locale.ts'
 import { shouldFire } from '../src/sensors.ts'
@@ -84,9 +83,9 @@ describe('presentation locale', () => {
       .toBe(`Pattern /ready/ started matching: ${match}`)
   })
 
-  it('can embed the same closure-free formatter in a standalone dashboard script', () => {
+  it('uses the same typed formatters for each presentation entry point', () => {
     for (const locale of ['en', 'zh'] as const) {
-      const presentation = runInNewContext(`(${createPresentation.toString()})(${JSON.stringify(locale)}, ${JSON.stringify(messages[locale])})`) as ReturnType<typeof createPresentation>
+      const presentation = createPresentation(locale, messages[locale])
       for (const { fact } of cases) expect(presentation.formatFireSummary(fact)).toBe(formatFireSummary(fact, locale))
     }
   })

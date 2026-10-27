@@ -61,8 +61,8 @@ import {
 import { probe, shouldFire } from './sensors.ts'
 import { SentinelStore, type FoldableRow } from './store.ts'
 import { formatFireSummary, localizeState, negotiateLocale, resolveLocale, translate, type FireMessage, type Locale } from './locale.ts'
-import { dashboardHtml } from './dashboard.ts'
-export { dashboardHtml } from './dashboard.ts'
+import { dashboardHtml, dashboardScript, DASHBOARD_SCRIPT_PATH } from './dashboard.ts'
+export { dashboardHtml, DASHBOARD_SCRIPT_PATH } from './dashboard.ts'
 // Preserve the public boolean-based helper while sharing presentation logic with the client.
 export { localizeState } from './dashboard.ts'
 
@@ -1370,6 +1370,36 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
     },
   })
 
+  const stopDashboardScript = webServer.register({
+    kind: 'exact',
+    path: DASHBOARD_SCRIPT_PATH,
+    handler: async (req, res) => {
+      const method = req.method ?? 'GET'
+      if (!requestAllowed(req)) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(method === 'HEAD' ? '' : 'forbidden')
+        return
+      }
+      if (method !== 'GET' && method !== 'HEAD') {
+        res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET, HEAD' })
+        res.end('GET or HEAD only')
+        return
+      }
+      try {
+        const script = await dashboardScript()
+        res.writeHead(200, {
+          'content-type': 'text/javascript; charset=utf-8',
+          'x-content-type-options': 'nosniff',
+          'cache-control': 'no-cache',
+        })
+        res.end(method === 'HEAD' ? '' : script)
+      } catch (error: unknown) {
+        res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
+        res.end(method === 'HEAD' ? '' : describe(error))
+      }
+    },
+  })
+
   const stopHook = webServer.register({
     kind: 'exact',
     path: HOOK_PATH,
@@ -1441,6 +1471,7 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
   return () => {
     stopRoute()
     stopDashboard()
+    stopDashboardScript()
     stopHook()
     stopCancel()
   }
