@@ -9,7 +9,7 @@ import badgeTemplate from '../templates/dashboard-badge.html?raw'
 import patternTemplate from '../templates/dashboard-pattern.html?raw'
 
 const en = {
-  title: 'Sentinel overview',
+  title: 'Sentinel overview', watchesTitle: 'Active watches',
   heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe', ''],
   fireHeads: ['Time', 'Watch', 'Session', 'Summary'],
   empty: 'No active watches right now.', firesTitle: 'Recent fires', firesEmpty: 'No fires yet.',
@@ -19,7 +19,7 @@ const en = {
   dutyStale: 'duty heartbeat stale ({age}s ago)', dutyNone: 'no resident duty process',
 }
 const zh: typeof en = {
-  title: 'Sentinel 全局总览',
+  title: 'Sentinel 全局总览', watchesTitle: '活跃监控',
   heads: ['会话', '监控', '传感器', '目标', '模式', '触发', '最近状态', '下次探测', ''],
   fireHeads: ['时间', '监控', '会话', '摘要'],
   empty: '当前没有活跃的监控。', firesTitle: '最近触发', firesEmpty: '尚未触发过。',

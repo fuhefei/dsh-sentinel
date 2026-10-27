@@ -27,7 +27,7 @@ export function dashboardHtml(
   const copy = dashboardCopy[locale]
   const render = createDashboardRenderer(locale)
   return renderTemplate(pageTemplate, {
-    lang: locale === 'zh' ? 'zh-CN' : 'en', title: copy.title, firesTitle: copy.firesTitle,
+    lang: locale === 'zh' ? 'zh-CN' : 'en', title: copy.title, firesTitle: copy.firesTitle, watchesTitle: copy.watchesTitle,
     scriptPath: DASHBOARD_SCRIPT_PATH,
   }, {
     'watch-headings': render.headings(copy.heads), 'fire-headings': render.headings(copy.fireHeads),

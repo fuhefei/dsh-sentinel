@@ -9,6 +9,8 @@
   @media (prefers-color-scheme: dark) { :root { --s-bg: #17181c; --s-fg: #e3e4e8; --s-muted: #8a8f99; --s-border: #33353c; --s-code: #24262c; } }
   body { font-family: system-ui, sans-serif; margin: 24px; color: var(--s-fg); background: var(--s-bg); }
   h1 { font-size: 16px; }
+  .table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+  .table-scroll:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
   table { border-collapse: collapse; width: 100%; font-size: 13px; }
   th, td { border-bottom: 1px solid var(--s-border); padding: 6px 10px; text-align: left; vertical-align: top; }
   th { color: var(--s-muted); font-weight: 500; white-space: nowrap; }
@@ -26,14 +28,18 @@
 </head>
 <body>
 <h1><span id="title">👁 {{title}}</span> <small id="meta"></small></h1>
+<div class="table-scroll" role="region" aria-label="{{watchesTitle}}" tabindex="0">
 <table>
 <thead><tr><!-- sentinel:watch-headings --></tr></thead>
 <tbody id="rows"><!-- sentinel:watches --></tbody>
 </table>
+</div>
 <h2 id="firesTitle">{{firesTitle}}</h2>
+<div class="table-scroll" role="region" aria-label="{{firesTitle}}" tabindex="0">
 <table>
 <thead><tr><!-- sentinel:fire-headings --></tr></thead>
 <tbody id="fires"><!-- sentinel:fires --></tbody>
 </table>
+</div>
 </body>
 </html>

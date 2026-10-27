@@ -30,6 +30,17 @@ describe('dashboardHtml', () => {
     expect(html).toContain('<tbody id="rows">')
   })
 
+  it.each([
+    ['en', 'Active watches', 'Recent fires'], ['zh', '活跃监控', '最近触发'],
+  ] as const)('contains wide tables in labeled keyboard-focusable scroll regions in %s', (locale, watches, fires) => {
+    const html = dashboardHtml([row({ target: '/tmp/' + 'long-path-'.repeat(50) })], [], {}, locale)
+    expect(html).toContain(`class="table-scroll" role="region" aria-label="${watches}" tabindex="0"`)
+    expect(html).toContain(`class="table-scroll" role="region" aria-label="${fires}" tabindex="0"`)
+    expect(html.match(/class="table-scroll"/g)).toHaveLength(2)
+    expect(html).toMatch(/\.table-scroll\s*\{[^}]*max-width:\s*100%[^}]*overflow-x:\s*auto/)
+    expect(html).toContain('data-id="watch-1"')
+  })
+
   it('loads only the standalone deferred browser asset, with no executable inline script', () => {
     const html = dashboardHtml([])
     expect(html.match(/<script\b[^>]*>[\s\S]*?<\/script>/g)).toEqual([
