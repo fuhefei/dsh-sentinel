@@ -190,6 +190,17 @@ describe('foldSentinelEvents', () => {
 })
 
 describe('decodeSentinelChange', () => {
+  it('keeps legacy fires readable and round-trips optional neutral trigger data', () => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
+    expect(decodeSentinelChange(legacy)).toEqual(legacy)
+    const current = { ...legacy, fact: { ...legacy.fact, trigger: { kind: 'pattern', pattern: '准备', match: '准备' }, state: 'exit 0' } }
+    expect(decodeSentinelChange(current)).toEqual(current)
+    for (const trigger of [null, { kind: 'unknown' }, { kind: 'pattern', match: 'x' }, { kind: 'pattern', pattern: 1, match: 'x' }]) {
+      expect(() => decodeSentinelChange({ ...legacy, fact: { ...legacy.fact, trigger } })).toThrow(SentinelLogError)
+    }
+    expect(() => decodeSentinelChange({ ...legacy, fact: { ...legacy.fact, state: 1 } })).toThrow(SentinelLogError)
+  })
+
   it('round-trips a created payload', () => {
     const decoded = decodeSentinelChange(createdEvent('watch-2').payload)
     expect(decoded.change).toBe('created')
@@ -255,15 +266,28 @@ describe('renderWakeup', () => {
   it('carries the receipt, the fact, and the note verbatim', () => {
     const body = renderWakeup(sub, { fireNumber: 1, summary: '模式开始匹配', before: 'active', after: 'inactive', probeMs: 12 })
     expect(body).toContain('watch-3')
-    expect(body).toContain('第 1/2 次')
+    expect(body).toContain('fired (1/2)')
     expect(body).toContain('服务挂了先看 journalctl 再重启')
-    expect(body).toContain("剩余 1 次")
+    expect(body).toContain('Remaining fires: 1')
     expect(body).toContain("sentinel_cancel")
+  })
+
+  it.each(['en', 'zh'] as const)('renders structured triggers and guardrails in %s, preserving notes and snapshots', locale => {
+    const fact = { fireNumber: 1, summary: '旧摘要', trigger: { kind: 'change' as const }, state: 'exit 0', before: 'active $&', after: '部署 {note}', probeMs: 1 }
+    const body = renderWakeup(sub, fact, locale)
+    expect(body).toContain(locale === 'en' ? 'Snapshot changed (state: exit 0)' : '快照发生变化（状态: 退出码 0）')
+    expect(body).toContain(locale === 'en' ? 'do not re-register' : '不要重新注册监控')
+    expect(body).toContain(sub.note)
+    expect(body).toContain(fact.before)
+    expect(body).toContain(fact.after)
+    expect(body).toContain('sentinel_cancel')
+    const terminal = renderWakeup(sub, { ...fact, fireNumber: sub.maxFires }, locale)
+    expect(terminal).toContain(locale === 'en' ? 'This was the final fire' : '最后一次触发')
   })
 
   it('marks the final fire as terminal', () => {
     const body = renderWakeup({ ...sub, fireCount: 1 }, { fireNumber: 2, summary: 's', before: '', after: 'x', probeMs: 1 })
-    expect(body).toContain('最后一次触发')
+    expect(body).toContain('This was the final fire')
   })
 })
 

@@ -41,6 +41,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 - id: dsh-sentinel
   name: dsh-sentinel
   config:
+    locale: en                  # 服务端消息：en（默认）或 zh；界面跟随宿主
     heartbeatMs: 5000            # 探测轮间隔
     probeConcurrency: 8          # 每轮并发探测数
     maxSubscriptionsPerSession: 16
@@ -54,6 +55,16 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 非法值会让插件加载时以 schema 错误失败，而不是运行时乱来。
 
 `notifyWebhookUrl` 把每次触发以 JSON POST（`{plugin, event, sessionId, id, kind, target, note, fireNumber, maxFires, summary, after}`）送出 harness——指向飞书/企微/Slack 机器人或任意接收端都行。这条投递是 at-most-once：POST 失败只在日志里 warn，绝不阻塞 harness 内的唤醒。
+
+## 本地化
+
+- dock、全局面板及可选的 better-sidebar 标签页跟随 DSH 的语言设置，打开时切换语言也会更新，不再用浏览器语言覆盖宿主偏好。支持英文和中文，其他宿主语言沿注册的回退链查找这两种字典，最终回退到英文。
+- dashboard 链接通过 `?lang=en` 或 `?lang=zh` 传递界面语言。直接访问时使用请求的首选 `Accept-Language`，未提供偏好则使用服务端 `locale`。初始 HTML 和后续刷新使用同一语言，包括页面标题、两张表的表头、状态标签、时间和触发摘要。
+- 工具及后台唤醒没有浏览器语言上下文。其回执、指令和通知摘要使用插件配置 `locale`（默认 `en`，设置 `zh` 可保留中文服务端消息）。工具 schema、协议字段及开发诊断仍使用英文。
+- 触发事件保留兼容旧消费者的可读 `summary`，并新增可选的语言无关字段 `trigger` 和 `state`，界面按查看者语言格式化。已知的旧版中英文摘要也按所选语言展示，不重写 sidecar 日志；未知或无法明确解析的摘要原样保留。
+- 便签、目标、正则、匹配文本、webhook 载荷及前后快照保持原文。快照字节和占位符绝不翻译，因此本地化不会产生虚假变化或改变正则匹配。
+
+例如，英文界面会显示 `Snapshot changed (state: exit 0)`，而不是 `快照发生变化（状态: exit 0）`，不受服务端消息语言影响。
 
 ## 工具
 

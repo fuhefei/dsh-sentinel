@@ -30,3 +30,14 @@ either broken once or is one edit away from breaking.
    UI row) is the kill switch of last resort; never assume the agent is
    reachable. The state route exposes `pendingWakeups` per watch so queued
    wakeups are visible, not silent.
+8. **Localization is presentation, not sensor data.** Browser surfaces follow
+   the host locale; standalone dashboard links carry that locale explicitly.
+   Server messages use the configured `locale` (English by default). Persist
+   neutral trigger data alongside the readable summary so viewers can render
+   their own language. Never translate snapshot bytes, placeholder tokens,
+   notes, regexes, matches or protocol fields. Legacy summaries remain readable;
+   unknown or ambiguous text must pass through rather than being guessed or
+   rewritten. Follow the host's registered fallback chain for custom languages.
+   Dashboard render helpers are embedded in an inline script, so they must be
+   closure-free or receive all dependencies explicitly. Test that script after
+   bundling as well as the initial HTML.

@@ -41,6 +41,7 @@ All deployment-tunable knobs live in the plugin's config schema (defaults in par
 - id: dsh-sentinel
   name: dsh-sentinel
   config:
+    locale: en                  # server messages: en (default) or zh; UI follows the host
     heartbeatMs: 5000            # probe round interval
     probeConcurrency: 8          # in-flight probes per round
     maxSubscriptionsPerSession: 16
@@ -54,6 +55,16 @@ All deployment-tunable knobs live in the plugin's config schema (defaults in par
 Invalid values fail plugin load with a schema error rather than misbehaving at runtime.
 
 `notifyWebhookUrl` fans every fire out of the harness as a JSON POST (`{plugin, event, sessionId, id, kind, target, note, fireNumber, maxFires, summary, after}`) — point it at a Lark/WeCom/Slack bot or any receiver. Delivery is at-most-once: a failed POST warns in the log and never blocks the in-harness wakeup.
+
+## Localization
+
+- The dock, global panel and optional better-sidebar tab follow the DSH language setting, including changes while they are open. They do not override it with the browser's language. English and Chinese are supported; other host languages follow their registered fallback chain to one of these dictionaries, with English as the final fallback.
+- Dashboard links carry the selected UI language as `?lang=en` or `?lang=zh`. A direct dashboard request uses its first `Accept-Language` preference, or the server `locale` when no preference is supplied. The initial HTML and subsequent refreshes use the same language, including the page title, both table headers, sensor labels, timestamps and fire summaries.
+- Tools and background wakeups have no browser locale. Their receipts, instructions and notification summaries use the plugin's `locale` config (`en` by default, `zh` to retain Chinese server messages). Tool schemas, protocol fields and developer diagnostics remain English.
+- Fire events retain a readable `summary` for existing consumers and add optional language-neutral `trigger` and `state` fields. UI consumers format those fields in the viewer's language. Known legacy English/Chinese summaries are also displayed in that language without rewriting the sidecar; unknown or ambiguous summaries pass through unchanged.
+- Notes, targets, regexes, matched text, webhook payloads and before/after snapshots remain verbatim. Snapshot bytes and placeholder tokens are never translated, so localization cannot create a false transition or change regex matching.
+
+For example, an English UI now shows `Snapshot changed (state: exit 0)` instead of `快照发生变化（状态: exit 0）`, regardless of the server's message language.
 
 ## Tools
 

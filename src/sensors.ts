@@ -11,6 +11,7 @@ import { exec, execFile } from 'node:child_process'
 import { connect } from 'node:net'
 import { open, stat } from 'node:fs/promises'
 import type { SensorSpec } from './domain.ts'
+import { formatFireSummary, type FireTrigger } from './locale.ts'
 
 export interface ProbeResult {
   /** Canonical snapshot text (diffed against the previous probe). */
@@ -175,18 +176,22 @@ export function shouldFire(
   pattern: string | undefined,
   previous: string | undefined,
   current: string,
-): { fire: boolean; summary: string } {
+): { fire: boolean; summary: string; trigger?: FireTrigger } {
   if (pattern !== undefined) {
     const regex = new RegExp(pattern, 'm')
     const was = previous !== undefined && !isPlaceholderSnapshot(previous) && regex.test(previous)
     const is = !isPlaceholderSnapshot(current) && regex.test(current)
     if (!was && is) {
       const match = regex.exec(current)
-      return { fire: true, summary: `模式 /${pattern}/ 开始匹配: ${match?.[0] ?? ''}` }
+      const trigger: FireTrigger = { kind: 'pattern', pattern, match: match?.[0] ?? '' }
+      return { fire: true, summary: formatFireSummary({ summary: '', trigger }, 'en'), trigger }
     }
     return { fire: false, summary: '' }
   }
   if (previous === undefined) return { fire: false, summary: '' }
-  if (previous !== current) return { fire: true, summary: '快照发生变化' }
+  if (previous !== current) {
+    const trigger: FireTrigger = { kind: 'change' }
+    return { fire: true, summary: formatFireSummary({ summary: '', trigger }, 'en'), trigger }
+  }
   return { fire: false, summary: '' }
 }

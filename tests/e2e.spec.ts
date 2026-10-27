@@ -4,7 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage, type ServerResp
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { apply, CANCEL_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
+import { apply, CANCEL_PATH, DASHBOARD_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
@@ -14,7 +14,11 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
   // `plugin` kind, so the contract we must hold is our own declared kind.
   const sources: unknown[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
-  const tools: Array<{ name: string; execute: (args: unknown, exec: unknown) => Promise<unknown> }> = []
+  const tools: Array<{
+    name: string
+    execute: (args: unknown, exec: unknown) => Promise<unknown>
+    output: { render(args: unknown, value: unknown): Array<{ type: string; text?: string }> }
+  }> = []
   const cleanups: Array<() => void | Promise<void>> = []
   const live = new Map<string, ReturnType<typeof buildAgent>>()
   const resumeCalls: string[] = []
@@ -139,6 +143,78 @@ describe('sentinel end-to-end (in-process)', () => {
     return dir
   }
 
+  it.each(['en', 'zh'] as const)('localizes tool receipts and webhook wakeups in %s without translating data', async locale => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, locale, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(200)
+    const watch = harness.tools.find(tool => tool.name === 'sentinel_watch')!
+    const list = harness.tools.find(tool => tool.name === 'sentinel_list')!
+    const cancel = harness.tools.find(tool => tool.name === 'sentinel_cancel')!
+    const render = (tool: typeof watch, value: unknown) => tool.output.render({}, value).map(block => block.text ?? '').join('')
+    expect(render(list, await list.execute({}, {}))).toBe(locale === 'en' ? 'No active sentinel watches.' : '没有活跃的哨兵订阅。')
+    const command = await watch.execute({ kind: 'command', target: 'printf ready', note: 'user note', max_fires: 2 }, {})
+    expect(render(watch, command)).toContain(locale === 'en' ? 'probe every 30s' : '每 30s 探测')
+    const args = { kind: 'webhook', target: '用户 CI', note: 'Проверь 部署 $& {id}', max_fires: 1 }
+    const created = await watch.execute(args, {}) as { id: string }
+    const receipt = render(watch, created)
+    expect(receipt).toContain(locale === 'en' ? 'Sentinel watch' : '哨兵订阅')
+    expect(receipt).toContain(args.target)
+    expect(receipt).toContain(locale === 'en' ? 'Push URL: POST' : '推送地址: POST')
+    expect(receipt).toContain(locale === 'en' ? 'resident dsh process' : '需常驻 dsh 进程')
+    expect(render(list, await list.execute({}, {}))).toContain(locale === 'en' ? 'fired 0/1' : '触发 0/1')
+    const missing = render(cancel, await cancel.execute({ id: 'watch-999' }, {}))
+    expect(missing).toContain(locale === 'en' ? 'No active watch' : '没有名为')
+    const cancelled = render(cancel, await cancel.execute({ id: 'watch-1' }, {}))
+    expect(cancelled).toContain(locale === 'en' ? 'cancelled' : '已取消')
+    const hook = harness.routes.find(route => route.path === HOOK_PATH)!
+    const payload = '部署 готов $& {note}'
+    await new Promise<void>(resolve => {
+      const data: Array<(chunk?: unknown) => void> = []
+      const ends: Array<(chunk?: unknown) => void> = []
+      hook.handler({ method: 'POST', url: `${HOOK_PATH}?id=${created.id}&s=session-e2e`,
+        on(event: string, callback: (chunk?: unknown) => void) { (event === 'data' ? data : ends).push(callback) },
+      }, { writeHead() {}, end() { resolve() } })
+      for (const listener of data) listener(payload)
+      for (const listener of ends) listener()
+    })
+    await expect.poll(() => harness.followups.length).toBe(1)
+    const body = harness.followups[0]!
+    expect(body).toContain(args.note)
+    expect(body).toContain(payload)
+    expect(body).toContain(locale === 'en' ? 'External push received (webhook)' : '外部推送到达（webhook）')
+    expect(body).toContain(locale === 'en' ? 'This was the final fire' : '最后一次触发')
+    const stateRoute = harness.routes.find(route => route.path === STATE_PATH)!
+    let stateBody = ''
+    await stateRoute.handler({ url: STATE_PATH }, { writeHead() {}, end(body: string) { stateBody = body } })
+    const state = JSON.parse(stateBody) as { recentFires: Array<{ trigger: unknown; after: string }> }
+    expect(state.recentFires[0]?.trigger).toEqual({ kind: 'webhook' })
+    expect(state.recentFires[0]?.after).toBe(payload)
+  })
+
+  it('selects dashboard locale from the host link, then the request, then server fallback', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, locale: 'zh' })
+    const route = harness.routes.find(route => route.path === DASHBOARD_PATH)!
+    const render = async (query: string, accept?: string) => {
+      let body = ''
+      await route.handler({ url: `${DASHBOARD_PATH}${query}`, headers: accept === undefined ? {} : { 'accept-language': accept } },
+        { writeHead() {}, end(value: string) { body = value } })
+      return body.split('<script>')[0]!
+    }
+    expect(await render('?lang=en', 'zh-CN')).toContain('<html lang="en">')
+    expect(await render('?lang=zh', 'en-US')).toContain('<html lang="zh-CN">')
+    expect(await render('', 'en-US,en;q=0.9')).toContain('<html lang="en">')
+    expect(await render('', 'zh-TW')).toContain('<html lang="zh-CN">')
+    expect(await render('', 'ru-RU')).toContain('<html lang="en">')
+    expect(await render('')).toContain('<html lang="zh-CN">')
+    expect(await render('?lang=%3Cscript%3E')).toContain('<html lang="en">')
+  })
+
   it('finishes an in-flight duty claim before disposal returns', async () => {
     const dir = await freshHome()
     const harness = makeHarness()
@@ -235,7 +311,7 @@ describe('sentinel end-to-end (in-process)', () => {
     const wakeup = harness.followups[0] ?? ''
     expect(wakeup).toContain('watch-1')
     expect(wakeup).toContain('触发后继续部署流程')
-    expect(wakeup).toContain('最后一次触发')
+    expect(wakeup).toContain('This was the final fire')
     // Attribution contract: the wakeup declares the plugin's own source kind,
     // never the catch-all `plugin` kind that DSH 0.1.7 removed.
     expect(harness.sources[0]).toEqual({ kind: 'sentinel' })
@@ -783,7 +859,7 @@ describe('sentinel end-to-end (in-process)', () => {
     second.emit('agent/created', { agent: second.agent })
     await sleep(7000)
     expect(second.followups.length).toBe(1)
-    expect(second.followups[0]).toContain('[dsh-sentinel] 订阅 watch-1 触发')
+    expect(second.followups[0]).toContain('[dsh-sentinel] Watch watch-1 fired')
 
     // Delivery wrote its watermark: no third delivery of the same fire.
     const lines = await storeLines()
@@ -832,7 +908,7 @@ describe('sentinel end-to-end (in-process)', () => {
     await writeFile(flag, 'took over')
     await sleep(1500)
     expect(passive.followups.length).toBe(1)
-    expect(passive.followups[0]).toContain('订阅 watch-2 触发')
+    expect(passive.followups[0]).toContain('Watch watch-2 fired')
   }, 25_000)
 
   it('fans fires out to the optional notify webhook', async () => {
@@ -868,6 +944,7 @@ describe('sentinel end-to-end (in-process)', () => {
     await expect.poll(() => received.length, { timeout: 5000 }).toBe(1)
     expect(received[0]?.['event']).toBe('fired')
     expect(received[0]?.['id']).toBe('watch-1')
-    expect(received[0]?.['summary']).toContain('快照')
+    expect(received[0]?.['summary']).toContain('Snapshot changed')
+    expect(received[0]?.['trigger']).toEqual({ kind: 'change' })
   }, 20_000)
 })
