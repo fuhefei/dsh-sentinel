@@ -1,0 +1,16 @@
+{{#watches}}
+<tr>
+  <td>{{session}}… <small>{{live}}</small>{{#dropped}} <small class="dropped">{{label}}</small>{{/dropped}}</td>
+  <td>{{id}}</td>
+  <td>{{kind}}</td>
+  <td class="target" title="{{note}}">{{target}}</td>
+  <td>{{#patternView}}<code>/{{pattern}}/</code>{{/patternView}}{{^patternView}}—{{/patternView}}</td>
+  <td>{{fireCount}}/{{maxFires}}{{#pending}} <small class="pending">{{label}}</small>{{/pending}}</td>
+  <td>{{state}}</td>
+  <td>{{next}}</td>
+  <td><button type="button" class="cancel" data-session="{{sessionId}}" data-id="{{id}}" title="{{cancel}}" aria-label="{{cancel}} {{id}}">×</button></td>
+</tr>
+{{/watches}}
+{{^watches}}
+<tr><td colspan="9" class="empty">{{emptyWatches}}</td></tr>
+{{/watches}}

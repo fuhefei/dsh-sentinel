@@ -1,14 +1,8 @@
 import type { WatchRow } from './index.ts'
 import { createPresentation, messages, type FireMessage, type Locale } from './locale.ts'
 import Mustache from 'mustache'
-import watchRowsTemplate from '../templates/dashboard-watches.html?raw'
-import fireRowsTemplate from '../templates/dashboard-fires.html?raw'
-import watchTemplate from '../templates/dashboard-watch.html?raw'
-import fireTemplate from '../templates/dashboard-fire.html?raw'
-import emptyTemplate from '../templates/dashboard-empty.html?raw'
-import headingTemplate from '../templates/dashboard-heading.html?raw'
-import badgeTemplate from '../templates/dashboard-badge.html?raw'
-import patternTemplate from '../templates/dashboard-pattern.html?raw'
+import watchRowsTemplate from '../templates/dashboard/watches.html?raw'
+import fireRowsTemplate from '../templates/dashboard/fires.html?raw'
 
 const en = {
   title: 'Sentinel overview', watchesTitle: 'Active watches',
@@ -42,8 +36,6 @@ export interface DashboardState {
 /** Static, checked-in partials only; caller data is never interpreted as a template. */
 export const dashboardPartials = {
   watchRows: watchRowsTemplate, fireRows: fireRowsTemplate,
-  watch: watchTemplate, fire: fireTemplate, empty: emptyTemplate,
-  heading: headingTemplate, badge: badgeTemplate, pattern: patternTemplate,
 }
 
 /** Share plain presentation models and Mustache templates between SSR and the browser. */
@@ -55,7 +47,7 @@ export function createDashboardRenderer(locale: Locale) {
   const time = (value?: string): string => (value === undefined ? new Date() : new Date(value))
     .toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en')
   const badge = (kind: 'pending' | 'dropped', count: number) => count > 0
-    ? { kind, label: fill(copy[kind], { n: count }) } : null
+    ? { label: fill(copy[kind], { n: count }) } : null
   const watchModel = (watches: readonly WatchRow[], dropped: Readonly<Record<string, number>> = {}) => ({
     watches: watches.map(row => ({
       session: row.sessionId.slice(0, 16), sessionId: row.sessionId,
@@ -71,13 +63,13 @@ export function createDashboardRenderer(locale: Locale) {
       // An empty regex is present and must not be confused with an omitted pattern.
       patternView: row.pattern === undefined ? null : { pattern: row.pattern },
     })),
-    emptyWatches: { columns: 9, message: copy.empty },
+    emptyWatches: copy.empty,
   })
   const fireModel = (facts: readonly DashboardFire[]) => ({
     fires: facts.map(fire => ({
       time: time(fire.at), id: fire.id, session: fire.sessionId.slice(0, 16), summary: presentation.formatFireSummary(fire),
     })),
-    emptyFires: { columns: 4, message: copy.firesEmpty },
+    emptyFires: copy.firesEmpty,
   })
   const rows = (watches: readonly WatchRow[], dropped: Readonly<Record<string, number>> = {}): string =>
     Mustache.render(watchRowsTemplate, watchModel(watches, dropped), dashboardPartials)

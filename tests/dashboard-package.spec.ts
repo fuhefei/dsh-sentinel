@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
-import { access, appendFile, mkdtemp, readFile, rm, symlink } from 'node:fs/promises'
+import { access, appendFile, mkdtemp, readFile, rename, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { runInNewContext } from 'node:vm'
@@ -12,6 +12,11 @@ const execFileAsync = promisify(execFile)
 const packageRoot = fileURLToPath(new URL('../', import.meta.url))
 const fixturePrefix = 'sentinel-dashboard-package-'
 const marker = '/* extracted dashboard package asset */'
+const assets = [
+  { name: 'script', path: '/plugins/dsh-sentinel/dashboard.js', file: 'lib/dashboard.js', mime: 'text/javascript; charset=utf-8', marker },
+  { name: 'stylesheet', path: '/plugins/dsh-sentinel/dashboard.css', file: 'lib/dashboard.css', mime: 'text/css; charset=utf-8', marker: '/* extracted dashboard package stylesheet */' },
+  { name: 'icon', path: '/plugins/dsh-sentinel/icon.svg', file: 'icon.svg', mime: 'image/svg+xml; charset=utf-8', marker: '<!-- extracted dashboard package icon -->' },
+] as const
 
 type Plugin = typeof import('../src/index.ts')
 type Host = Parameters<Plugin['apply']>[0]
@@ -75,6 +80,7 @@ describe('dashboard distribution assets', () => {
   let packedRoot: string
   let packedFiles: string[]
   let asset: string
+  const assetBodies = new Map<string, string>()
   let plugin: Plugin
   let runtime: ReturnType<typeof mountPlugin> | undefined
   const oldHome = process.env['DSH_HOME']
@@ -94,10 +100,13 @@ describe('dashboard distribution assets', () => {
     packedRoot = join(fixture, 'package')
     // The plugin intentionally resolves host-provided peer modules at runtime.
     await symlink(join(packageRoot, 'node_modules'), join(packedRoot, 'node_modules'), 'dir')
-    const script = join(packedRoot, 'lib', 'dashboard.js')
-    asset = await readFile(script, 'utf8')
-    await appendFile(script, `\n${marker}\n`, 'utf8')
-    asset += `\n${marker}\n`
+    for (const entry of assets) {
+      const path = join(packedRoot, entry.file)
+      const body = await readFile(path, 'utf8')
+      await appendFile(path, `\n${entry.marker}\n`, 'utf8')
+      assetBodies.set(entry.path, body + `\n${entry.marker}\n`)
+    }
+    asset = assetBodies.get('/plugins/dsh-sentinel/dashboard.js')!
     plugin = await import(pathToFileURL(join(packedRoot, 'lib', 'index.js')).href) as Plugin
     process.env['DSH_HOME'] = join(fixture, 'isolated-home')
     runtime = mountPlugin(plugin)
@@ -122,7 +131,10 @@ describe('dashboard distribution assets', () => {
   it('ships the standalone script and physical HTML templates without requiring source files', async () => {
     expect(packedFiles).toContain('lib/index.js')
     expect(packedFiles).toContain('lib/dashboard.js')
-    expect(packedFiles.filter(path => path.startsWith('templates/') && path.endsWith('.html')).length).toBeGreaterThan(1)
+    expect(packedFiles).toContain('lib/dashboard.css')
+    expect(packedFiles.filter(path => path.startsWith('templates/') && path.endsWith('.html')).sort()).toEqual([
+      'templates/dashboard.html', 'templates/dashboard/fires.html', 'templates/dashboard/watches.html', 'templates/layouts/document.html',
+    ])
     expect(packedFiles.some(path => path.startsWith('src/'))).toBe(false)
     await expect(access(join(packedRoot, 'src'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
@@ -143,6 +155,9 @@ describe('dashboard distribution assets', () => {
     expect(html).toContain('<title>Sentinel overview</title>')
     expect(html).toContain(`<script src="${Mustache.escape('/plugins/dsh-sentinel/dashboard.js')}" defer></script>`)
     expect(html).toMatch(/<script\b[^>]*\bdefer(?:\s|>|=)/)
+    expect(html).toContain(`<link rel="stylesheet" href="${Mustache.escape('/plugins/dsh-sentinel/dashboard.css')}">`)
+    expect(html).toContain(`<link rel="icon" type="image/svg+xml" href="${Mustache.escape('/plugins/dsh-sentinel/icon.svg')}">`)
+    expect(html).not.toContain('<style')
     expect(html).not.toMatch(/<script\b[^>]*>\s*\S[\s\S]*?<\/script>/)
     expect(html).not.toContain('<img src=x')
     expect(html).toContain(Mustache.escape('</script><img src=x onerror=alert(1)> {{title}} <!-- sentinel:rows -->'))
@@ -209,39 +224,78 @@ describe('dashboard distribution assets', () => {
     expect(timers.size).toBe(0)
   })
 
-  it('serves the asset relative to the imported package, not the workspace or current directory', async () => {
-    const route = runtime!.routes.get('/plugins/dsh-sentinel/dashboard.js')
+  it.each(assets)('serves $name from the installed package rather than the workspace', async entry => {
+    const route = runtime!.routes.get(entry.path)
     expect(route).toBeDefined()
     const result = await request(route!, 'GET', { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' })
     expect(result.status).toBe(200)
-    expect(result.headers['content-type']).toBe('text/javascript; charset=utf-8')
+    expect(result.headers['content-type']).toBe(entry.mime)
     expect(result.headers['x-content-type-options']).toBe('nosniff')
     expect(result.headers['cache-control']).toBe('no-cache')
-    expect(result.body).toBe(asset)
-    expect(result.body).toContain(marker)
+    expect(result.body).toBe(assetBodies.get(entry.path))
+    expect(result.body).toContain(entry.marker)
   })
 
-  it('supports HEAD without a body and rejects non-read methods', async () => {
-    const route = runtime!.routes.get('/plugins/dsh-sentinel/dashboard.js')!
+  it('serves the external stylesheet with its own MIME type and no inline fallback', async () => {
+    const route = runtime!.routes.get('/plugins/dsh-sentinel/dashboard.css')
+    expect(route).toBeDefined()
+    const result = await request(route!, 'GET', { host: '127.0.0.1:3080', 'sec-fetch-site': 'same-origin' })
+    expect(result.status).toBe(200)
+    expect(result.headers['content-type']).toBe('text/css; charset=utf-8')
+    expect(result.body).toContain('.table-scroll')
+    expect(plugin.dashboardHtml([])).not.toContain('<style')
+  })
+
+  it.each(assets)('supports HEAD without a body and rejects non-read methods for $name', async entry => {
+    const route = runtime!.routes.get(entry.path)!
     const head = await request(route, 'HEAD')
     expect(head.status).toBe(200)
-    expect(head.headers['content-type']).toBe('text/javascript; charset=utf-8')
+    expect(head.headers['content-type']).toBe(entry.mime)
     expect(head.body).toBe('')
     const post = await request(route, 'POST')
     expect(post.status).toBe(405)
     expect(post.headers.allow).toBe('GET, HEAD')
-    expect(post.body).not.toContain(marker)
+    expect(post.body).not.toContain(entry.marker)
   })
 
-  it('retains the browser-trust fence for script requests', async () => {
-    const route = runtime!.routes.get('/plugins/dsh-sentinel/dashboard.js')!
+  it.each(assets)('retains the browser-trust fence for $name GET and HEAD', async entry => {
+    const route = runtime!.routes.get(entry.path)!
     for (const headers of [
       { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' },
       { host: 'rebound.example:3080', origin: 'http://rebound.example:3080', 'sec-fetch-site': 'same-origin' },
     ]) {
-      const result = await request(route, 'GET', headers)
-      expect(result.status).toBe(403)
-      expect(result.body).not.toContain(marker)
+      for (const method of ['GET', 'HEAD']) {
+        const result = await request(route, method, headers)
+        expect(result.status).toBe(403)
+        expect(result.body).not.toContain(entry.marker)
+        if (method === 'HEAD') expect(result.body).toBe('')
+      }
+    }
+  })
+
+  it.each(assets)('reports missing $name files as 500 without a HEAD body or HTML fallback', async entry => {
+    const root = resolve(packedRoot)
+    const file = resolve(root, entry.file)
+    const parked = file + '.unavailable'
+    if (root !== resolve(fixture!, 'package') || !file.startsWith(root + sep) || dirname(parked) !== dirname(file)) {
+      throw new Error('Refusing to rename an unexpected package asset')
+    }
+    const route = runtime!.routes.get(entry.path)!
+    await rename(file, parked)
+    try {
+      for (const method of ['GET', 'HEAD']) {
+        const result = await request(route, method)
+        expect(result.status).toBe(500)
+        expect(result.headers['content-type']).toBe('text/plain; charset=utf-8')
+        expect(result.body).not.toContain(entry.marker)
+        expect(result.body).not.toContain('<!doctype html>')
+        if (method === 'HEAD') expect(result.body).toBe('')
+      }
+      const forbidden = await request(route, 'HEAD', { host: '127.0.0.1:3080', 'sec-fetch-site': 'cross-site' })
+      expect(forbidden.status).toBe(403)
+      expect(forbidden.body).toBe('')
+    } finally {
+      await rename(parked, file)
     }
   })
 })

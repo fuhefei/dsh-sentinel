@@ -4,6 +4,9 @@ import { dashboardHtml } from '../src/dashboard.ts'
 import { createDashboardRenderer, dashboardPartials } from '../src/dashboard-view.ts'
 import type { WatchRow } from '../src/index.ts'
 import pageTemplate from '../templates/dashboard.html?raw'
+import documentTemplate from '../templates/layouts/document.html?raw'
+
+const partials = { dashboard: pageTemplate, ...dashboardPartials }
 
 function watch(overrides: Partial<WatchRow> = {}): WatchRow {
   return {
@@ -17,14 +20,14 @@ function checkTokens(tokens: TemplateSpans): void {
   for (const token of tokens) {
     expect(token[0]).not.toBe('&')
     expect(token[0]).not.toBe('=')
-    if (token[0] === '>') expect(Object.hasOwn(dashboardPartials, token[1])).toBe(true)
+    if (token[0] === '>') expect(Object.hasOwn(partials, token[1])).toBe(true)
     if (Array.isArray(token[4])) checkTokens(token[4])
   }
 }
 
 describe('dashboard Mustache templates', () => {
   it('uses escaped variables and a static partial registry without raw HTML slots', () => {
-    for (const template of [pageTemplate, ...Object.values(dashboardPartials)]) checkTokens(Mustache.parse(template))
+    for (const template of [documentTemplate, ...Object.values(partials)]) checkTokens(Mustache.parse(template))
   })
 
   it.each(['en', 'zh'] as const)('preserves literal caller data in text and attributes in %s', locale => {

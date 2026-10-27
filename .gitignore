@@ -4,6 +4,7 @@ lib/*
 !lib/client.js
 !lib/client.js.map
 !lib/dashboard.js
+!lib/dashboard.css
 *.tsbuildinfo
 *.bak
 driver*.sh

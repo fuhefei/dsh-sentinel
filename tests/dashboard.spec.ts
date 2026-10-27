@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs'
 import Mustache from 'mustache'
 import { describe, expect, it } from 'vitest'
-import { dashboardHtml, DASHBOARD_SCRIPT_PATH, localizeState } from '../src/dashboard.ts'
+import { dashboardHtml, DASHBOARD_SCRIPT_PATH, DASHBOARD_STYLE_PATH, DASHBOARD_ICON_PATH, localizeState } from '../src/dashboard.ts'
 import type { WatchRow } from '../src/index.ts'
 
 function row(overrides: Partial<WatchRow> = {}): WatchRow {
@@ -38,8 +39,18 @@ describe('dashboardHtml', () => {
     expect(html).toContain(`class="table-scroll" role="region" aria-label="${watches}" tabindex="0"`)
     expect(html).toContain(`class="table-scroll" role="region" aria-label="${fires}" tabindex="0"`)
     expect(html.match(/class="table-scroll"/g)).toHaveLength(2)
-    expect(html).toMatch(/\.table-scroll\s*\{[^}]*max-width:\s*100%[^}]*overflow-x:\s*auto/)
+    const css = readFileSync(new URL('../src/dashboard.css', import.meta.url), 'utf8')
+    expect(css).toMatch(/\.table-scroll\s*\{[^}]*max-width:\s*100%[^}]*overflow-x:\s*auto/)
     expect(html).toContain('data-id="watch-1"')
+  })
+
+  it('composes the document layout and dashboard with external styles and a package icon', () => {
+    const html = dashboardHtml([])
+    expect(html.match(/<!doctype html>/g)).toHaveLength(1)
+    expect(html.match(/<main>/g)).toHaveLength(1)
+    expect(html).toContain(`<link rel="stylesheet" href="${Mustache.escape(DASHBOARD_STYLE_PATH)}">`)
+    expect(html).toContain(`<link rel="icon" type="image/svg+xml" href="${Mustache.escape(DASHBOARD_ICON_PATH)}">`)
+    expect(html).not.toMatch(/<style\b|\sstyle=/)
   })
 
   it('loads only the standalone deferred browser asset, with no executable inline script', () => {

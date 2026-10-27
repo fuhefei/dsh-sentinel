@@ -61,8 +61,8 @@ import {
 import { probe, shouldFire } from './sensors.ts'
 import { SentinelStore, type FoldableRow } from './store.ts'
 import { formatFireSummary, localizeState, negotiateLocale, resolveLocale, translate, type FireMessage, type Locale } from './locale.ts'
-import { dashboardHtml, dashboardScript, DASHBOARD_SCRIPT_PATH } from './dashboard.ts'
-export { dashboardHtml, DASHBOARD_SCRIPT_PATH } from './dashboard.ts'
+import { dashboardHtml, dashboardAssets } from './dashboard.ts'
+export { dashboardHtml, DASHBOARD_SCRIPT_PATH, DASHBOARD_STYLE_PATH, DASHBOARD_ICON_PATH } from './dashboard.ts'
 // Preserve the public boolean-based helper while sharing presentation logic with the client.
 export { localizeState } from './dashboard.ts'
 
@@ -1370,9 +1370,9 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
     },
   })
 
-  const stopDashboardScript = webServer.register({
+  const stopAssets = dashboardAssets.map(asset => webServer.register({
     kind: 'exact',
-    path: DASHBOARD_SCRIPT_PATH,
+    path: asset.path,
     handler: async (req, res) => {
       const method = req.method ?? 'GET'
       if (!requestAllowed(req)) {
@@ -1386,19 +1386,19 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
         return
       }
       try {
-        const script = await dashboardScript()
+        const body = await readFile(asset.file, 'utf8')
         res.writeHead(200, {
-          'content-type': 'text/javascript; charset=utf-8',
+          'content-type': asset.contentType,
           'x-content-type-options': 'nosniff',
           'cache-control': 'no-cache',
         })
-        res.end(method === 'HEAD' ? '' : script)
+        res.end(method === 'HEAD' ? '' : body)
       } catch (error: unknown) {
         res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })
         res.end(method === 'HEAD' ? '' : describe(error))
       }
     },
-  })
+  }))
 
   const stopHook = webServer.register({
     kind: 'exact',
@@ -1471,7 +1471,7 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
   return () => {
     stopRoute()
     stopDashboard()
-    stopDashboardScript()
+    for (const stopAsset of stopAssets) stopAsset()
     stopHook()
     stopCancel()
   }

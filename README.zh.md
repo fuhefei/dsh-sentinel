@@ -67,7 +67,18 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 例如，英文界面会显示 `Snapshot changed (state: exit 0)`，而不是 `快照发生变化（状态: exit 0）`，不受服务端消息语言影响。
 
-独立页面使用 [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0) 在服务端渲染仓库中的 `templates/*.html`，因此禁用 JavaScript 时仍有初始表格。标准 section 和静态 partial 组合页面，所有值均使用 Mustache 默认的 HTML 转义，适用于文本和带引号属性；不使用原始 HTML 插值、调用方提供的模板或模板函数。浏览器通过独立构建的 [dashboard 资源](lib/dashboard.js)（`defer` 加载）导入同一套类型检查过的展示模型和模板。Mustache 同时打包进服务端入口和独立浏览器资源，不需要可执行内联脚本、运行时代码生成、函数序列化或 DSH 浏览器启动上下文。模板导入在构建时内嵌，原始模板、编译后的浏览器资源和[第三方许可证声明](THIRD_PARTY_NOTICES.md) 随包发布。缺失的模板键遵循 Mustache 标准语义（输出空字符串）；必需的展示字段由类型化模型和模板契约测试覆盖，不再自建运行时模板校验器。
+独立页面使用 [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0)，按文档、页面、表格局部模板组织：
+
+```text
+templates/layouts/document.html  文档元信息与资源链接
+  templates/dashboard.html      页面结构与表头
+    templates/dashboard/watches.html  监控行与空状态
+    templates/dashboard/fires.html    触发记录行与空状态
+```
+
+这是 Mustache 标准 partial 组合，不自建模板继承扩展。简单标签、badge 和正则标记直接保留在所属模板，不再拆成单标签文件。服务端渲染完整初始表格，浏览器复用同一套有实际职责的行模板和类型化展示模型。所有值均使用默认 HTML 转义，不使用原始 HTML 插槽、调用方模板或模板函数。缺失键输出空字符串，必需展示字段由模型与模板契约测试覆盖。
+
+样式位于[独立 CSS 源文件](src/dashboard.css)，构建时复制为[发布的 CSS 资源](lib/dashboard.css)，由文档布局通过 link 加载。[独立浏览器脚本](lib/dashboard.js) 使用 `defer`。布局链接包内现有 SVG 图标，避免浏览器请求不存在的默认 favicon。不使用内联样式、可执行内联脚本、运行时代码生成、函数序列化或 DSH 浏览器启动上下文。Mustache 打包进 node 和浏览器入口；嵌套模板、CSS、JavaScript 和[第三方许可证声明](THIRD_PARTY_NOTICES.md) 随 npm 包发布。初始 HTML 和样式不依赖 JavaScript。
 
 ## 工具
 
@@ -79,7 +90,10 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 - `GET /plugins/dsh-sentinel/state?sessionId=…` — dock 和侧边栏面板用的只读状态（省略 `sessionId` 返回所有会话）。
 - `GET /plugins/dsh-sentinel/dashboard` — server 全局 watch 表。
-- `GET /plugins/dsh-sentinel/dashboard.js` — 独立浏览器资源（支持 `HEAD`，其他方法返回 405）。响应包含 JavaScript MIME 类型、`nosniff`，缓存需重新验证而非永久不可变。
+- `GET /plugins/dsh-sentinel/dashboard.js` — 独立浏览器脚本。
+- `GET /plugins/dsh-sentinel/dashboard.css` — 独立样式表。
+- `GET /plugins/dsh-sentinel/icon.svg` — 用作页面 favicon 的现有包图标。
+- 这三个固定资源支持无响应体的 `HEAD`，其他方法返回 405，并分别使用正确 MIME 类型、`nosniff` 和需重新验证的缓存策略。
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook 入口；把一条 `curl` 塞进 CI 任务、git hook 或另一台机器的脚本，就能叫醒 agent。watch id 按会话隔离，`s` 限定符保证两个会话的 `watch-1` hook 不打架（工具直接发完整 URL）。不带 `s` 的 URL 仍可用，解析到第一条匹配的 webhook watch。
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — 手动取消。dashboard 表和每个 UI 行都带 ✕，任何 watch 都能手动停掉——包括会话和 agent 早就不在了的孤儿 watch；host 没有 session-deleted 事件，所以这是最后的兜底开关。
 - 所有路由都带浏览器信任围栏：浏览器标记的跨站请求（恶意页面可以往 localhost form-POST）和 DNS rebinding 尝试（Host/Origin 指向 DNS 主机名）一律 403。`curl`、CI 任务这类无头客户端不受影响。state 路由还返回每个会话的 `duty`（租约心跳年龄）和 `droppedWakeups`（被 `maxPendingWakeups` 上限丢掉的排队唤醒）。

@@ -1,45 +1,18 @@
-<!doctype html>
-<html lang="{{lang}}">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{title}}</title>
-<style>
-  :root { --s-bg: #ffffff; --s-fg: #1f2329; --s-muted: #86909c; --s-border: #e5e6eb; --s-code: #f2f3f5; }
-  @media (prefers-color-scheme: dark) { :root { --s-bg: #17181c; --s-fg: #e3e4e8; --s-muted: #8a8f99; --s-border: #33353c; --s-code: #24262c; } }
-  body { font-family: system-ui, sans-serif; margin: 24px; color: var(--s-fg); background: var(--s-bg); }
-  h1 { font-size: 16px; }
-  .table-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
-  .table-scroll:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
-  table { border-collapse: collapse; width: 100%; font-size: 13px; }
-  th, td { border-bottom: 1px solid var(--s-border); padding: 6px 10px; text-align: left; vertical-align: top; }
-  th { color: var(--s-muted); font-weight: 500; white-space: nowrap; }
-  td.target { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  td.empty { color: var(--s-muted); text-align: center; padding: 24px; }
-  code { background: var(--s-code); padding: 1px 4px; border-radius: 4px; }
-  small { color: var(--s-muted); }
-  small.pending { color: #d4a72c; }
-  small.dropped { color: #e5484d; }
-  h2 { font-size: 13px; color: var(--s-muted); font-weight: 500; margin: 18px 0 6px; }
-  .cancel { border: none; background: transparent; color: var(--s-muted); cursor: pointer; font-size: 14px; line-height: 1; padding: 2px 6px; border-radius: 4px; }
-  .cancel:hover { color: #e5484d; background: rgba(229, 72, 77, .1); }
-</style>
-<script src="{{scriptPath}}" defer></script>
-</head>
-<body>
 <h1><span id="title">👁 {{title}}</span> <small id="meta"></small></h1>
 <div class="table-scroll" role="region" aria-label="{{watchesTitle}}" tabindex="0">
 <table>
-<thead><tr>{{#watchHeadings}}{{> heading}}{{/watchHeadings}}</tr></thead>
-<tbody id="rows">{{> watchRows}}</tbody>
+<thead><tr>{{#watchHeadings}}<th>{{label}}</th>{{/watchHeadings}}</tr></thead>
+<tbody id="rows">
+{{> watchRows}}
+</tbody>
 </table>
 </div>
 <h2 id="firesTitle">{{firesTitle}}</h2>
 <div class="table-scroll" role="region" aria-label="{{firesTitle}}" tabindex="0">
 <table>
-<thead><tr>{{#fireHeadings}}{{> heading}}{{/fireHeadings}}</tr></thead>
-<tbody id="fires">{{> fireRows}}</tbody>
+<thead><tr>{{#fireHeadings}}<th>{{label}}</th>{{/fireHeadings}}</tr></thead>
+<tbody id="fires">
+{{> fireRows}}
+</tbody>
 </table>
 </div>
-</body>
-</html>

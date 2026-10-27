@@ -29,7 +29,7 @@
     "patches",
     "icon.svg",
     "locale/*.json",
-    "templates/*.html"
+    "templates/**/*.html"
   ],
   "dsh": {
     "bundle": {

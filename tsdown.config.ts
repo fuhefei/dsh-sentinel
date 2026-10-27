@@ -72,6 +72,7 @@ export default [
     clean: false,
     plugins: [htmlTemplates()],
     deps: { alwaysBundle: ['mustache'], onlyBundle: ['mustache'] },
+    copy: ['src/dashboard.css'],
     outputOptions: { entryFileNames: 'dashboard.js' },
   },
   {

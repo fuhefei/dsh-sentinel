@@ -67,7 +67,18 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 
 For example, an English UI now shows `Snapshot changed (state: exit 0)` instead of `快照发生变化（状态: exit 0）`, regardless of the server's message language.
 
-The standalone page uses [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0) to render checked-in `templates/*.html` on the server, so its initial tables work without JavaScript. Standard sections and static partials compose the markup; all values use Mustache's default HTML escaping for text and quoted attributes. No raw-HTML interpolation, caller-supplied templates or template functions are used. The browser imports the same typed presentation models and templates through a separately built [dashboard asset](lib/dashboard.js), loaded with `defer`. Mustache is bundled into both the server entry and the self-contained browser asset, with no executable inline script, runtime code generation, function serialization or dependency on the DSH browser boot context. Template imports are embedded at build time; the original templates, compiled browser asset and [third-party license notice](THIRD_PARTY_NOTICES.md) are shipped in the package. Missing template keys follow standard Mustache semantics (empty output); typed models and template contract tests cover required presentation fields rather than a custom runtime template validator.
+The standalone page uses [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0) and a small document/page/partial hierarchy:
+
+```text
+templates/layouts/document.html  document metadata and asset links
+  templates/dashboard.html      page structure and table headings
+    templates/dashboard/watches.html  watch rows and their empty state
+    templates/dashboard/fires.html    fire rows and their empty state
+```
+
+This is standard Mustache partial composition, not a custom inheritance extension. Small tags, badges and regex markup stay in their owning template instead of one-tag files. The server renders the complete initial tables; the browser reuses the same meaningful row partials and typed presentation models. All values use default Mustache escaping for text and quoted attributes; no raw-HTML slots, caller-provided templates or template functions are used. Missing keys follow standard Mustache semantics (empty output); model and template contract tests cover required presentation fields.
+
+Styles live in [the standalone stylesheet source](src/dashboard.css), copied by the build to [the shipped CSS asset](lib/dashboard.css) and linked from the document layout. [The separate browser script](lib/dashboard.js) is loaded with `defer`. The layout links the existing packaged SVG icon, avoiding a browser fallback request to a missing favicon. There are no inline styles or executable inline scripts, runtime code generation, serialized functions or dependencies on the DSH browser boot context. Mustache is bundled into the node and browser entries. Nested templates, CSS, JavaScript and the [third-party license notice](THIRD_PARTY_NOTICES.md) are all included in the npm package; initial HTML and styling do not require JavaScript.
 
 ## Tools
 
@@ -79,7 +90,10 @@ The standalone page uses [Mustache.js 4.2.0](https://github.com/janl/mustache.js
 
 - `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar panel (omit `sessionId` for every session).
 - `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
-- `GET /plugins/dsh-sentinel/dashboard.js` — its self-contained browser asset (`HEAD` supported; other methods return 405). Served with JavaScript MIME type, `nosniff` and revalidation rather than immutable caching.
+- `GET /plugins/dsh-sentinel/dashboard.js` — its self-contained browser script.
+- `GET /plugins/dsh-sentinel/dashboard.css` — its standalone stylesheet.
+- `GET /plugins/dsh-sentinel/icon.svg` — the existing package icon used as the page favicon.
+- These three fixed assets support `HEAD` with no body, reject other methods with 405, and use their own MIME types, `nosniff` and revalidation rather than immutable caching.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
 - All routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
