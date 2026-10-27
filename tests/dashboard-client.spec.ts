@@ -1,3 +1,4 @@
+import Mustache from 'mustache'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { startDashboard } from '../src/dashboard-client.ts'
 import type { DashboardState } from '../src/dashboard-view.ts'
@@ -116,10 +117,10 @@ describe('standalone dashboard browser module', () => {
     expect(nodes.rows.innerHTML).toContain(values.absent)
     expect(nodes.rows.innerHTML).toContain(values.pending)
     expect(nodes.rows.innerHTML).toContain(values.dropped)
-    expect(nodes.rows.innerHTML).toContain('&quot;&gt;&lt;img src=x&gt;')
+    expect(nodes.rows.innerHTML).toContain(Mustache.escape('\"><img src=x>'))
     expect(nodes.rows.innerHTML).not.toContain('<img src=x>')
-    expect(nodes.fires.innerHTML).toContain(values.history)
-    expect(nodes.fires.innerHTML).toContain('READY &lt;/script&gt; $&amp; {{id}}')
+    expect(nodes.fires.innerHTML).toContain(Mustache.escape(values.history))
+    expect(nodes.fires.innerHTML).toContain(Mustache.escape('READY </script> $& {{id}}'))
     expect(nodes.fires.innerHTML).not.toContain('</script>')
     expect(nodes.meta.textContent).toContain(values.duty)
     expect(fetchMock).toHaveBeenCalledWith('/plugins/dsh-sentinel/state', expect.objectContaining({ signal: expect.any(AbortSignal) }))

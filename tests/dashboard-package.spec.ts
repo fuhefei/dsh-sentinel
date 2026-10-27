@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { runInNewContext } from 'node:vm'
+import Mustache from 'mustache'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 const execFileAsync = promisify(execFile)
@@ -126,6 +127,13 @@ describe('dashboard distribution assets', () => {
     await expect(access(join(packedRoot, 'src'))).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('bundles Mustache without requiring a host module and ships its license notice', async () => {
+    const nodeEntry = await readFile(join(packedRoot, 'lib', 'index.js'), 'utf8')
+    expect(nodeEntry).not.toMatch(/\bfrom\s*['"]mustache['"]/)
+    expect(packedFiles).toContain('THIRD_PARTY_NOTICES.md')
+    expect(await readFile(join(packedRoot, 'THIRD_PARTY_NOTICES.md'), 'utf8')).toContain('Copyright (c) 2010-2015 The mustache.js community')
+  })
+
   it('renders packaged server HTML with an external deferred script and escaped data', () => {
     const html = plugin.dashboardHtml([], [{
       sessionId: 'package-session', id: 'watch-1', at: '2026-01-01T00:00:00Z',
@@ -133,11 +141,11 @@ describe('dashboard distribution assets', () => {
     }])
     expect(html).toContain('<html lang="en">')
     expect(html).toContain('<title>Sentinel overview</title>')
-    expect(html).toMatch(/<script\b[^>]*\bsrc="\/plugins\/dsh-sentinel\/dashboard\.js"[^>]*><\/script>/)
+    expect(html).toContain(`<script src="${Mustache.escape('/plugins/dsh-sentinel/dashboard.js')}" defer></script>`)
     expect(html).toMatch(/<script\b[^>]*\bdefer(?:\s|>|=)/)
     expect(html).not.toMatch(/<script\b[^>]*>\s*\S[\s\S]*?<\/script>/)
     expect(html).not.toContain('<img src=x')
-    expect(html).toContain('&lt;/script&gt;&lt;img src=x onerror=alert(1)&gt; {{title}} &lt;!-- sentinel:rows --&gt;')
+    expect(html).toContain(Mustache.escape('</script><img src=x onerror=alert(1)> {{title}} <!-- sentinel:rows -->'))
   })
 
   it.each(['en', 'zh'] as const)('runs the packed standalone IIFE in %s without host boot globals', async locale => {
@@ -181,15 +189,15 @@ describe('dashboard distribution assets', () => {
       },
       setTimeout(callback: () => void) { timers.set(++ordinal, callback); return ordinal },
       clearTimeout(id: number) { timers.delete(id) },
-    }, { timeout: 1000 })
+    }, { timeout: 1000, contextCodeGeneration: { strings: false, wasm: false } })
     // All mocked I/O resolves immediately; yield once to drain the real Promise chain.
     await new Promise<void>(done => setImmediate(done))
     expect(calls).toEqual(['/plugins/dsh-sentinel/state'])
     expect(nodes.rows.innerHTML).toContain(locale === 'en' ? '<td>absent</td>' : '<td>不存在</td>')
     expect(nodes.rows.innerHTML).toContain(locale === 'en' ? '2 pending' : '待投递 2')
     expect(nodes.rows.innerHTML).toContain('&lt;target&gt; {{title}} &lt;!-- sentinel:watches --&gt;')
-    expect(nodes.fires.innerHTML).toContain(locale === 'en' ? 'Pattern /READY/ started matching:' : '模式 /READY/ 开始匹配:')
-    expect(nodes.fires.innerHTML).toContain('&lt;/script&gt;&lt;img src=x&gt; $&amp; {{title}}')
+    expect(nodes.fires.innerHTML).toContain(Mustache.escape(locale === 'en' ? 'Pattern /READY/ started matching:' : '模式 /READY/ 开始匹配:'))
+    expect(nodes.fires.innerHTML).toContain(Mustache.escape('</script><img src=x> $& {{title}}'))
     expect(nodes.fires.innerHTML).not.toContain('<img src=x>')
     expect(nodes.meta.textContent).toContain(locale === 'en' ? 'duty heartbeat stale (12s ago)' : '值守心跳 12s 前（疑似停摆）')
     const html = plugin.dashboardHtml([watch], [fire], { [watch.sessionId]: 3 }, locale)

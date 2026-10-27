@@ -59,6 +59,7 @@ export default [
     // packages resolve, so external users need zero npm installs.
     external: [/^@deepseek-ai\//, 'cordis'],
     plugins: [htmlTemplates()],
+    deps: { alwaysBundle: ['mustache'], onlyBundle: ['mustache'] },
   },
   {
     name: `${PLUGIN_ID}/dashboard`,
@@ -70,6 +71,7 @@ export default [
     dts: false,
     clean: false,
     plugins: [htmlTemplates()],
+    deps: { alwaysBundle: ['mustache'], onlyBundle: ['mustache'] },
     outputOptions: { entryFileNames: 'dashboard.js' },
   },
   {

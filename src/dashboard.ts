@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import type { WatchRow } from './index.ts'
 import { localizeState as stateLabel, type Locale } from './locale.ts'
-import { createDashboardRenderer, dashboardCopy, type DashboardFire } from './dashboard-view.ts'
-import { renderTemplate } from './dashboard-template.ts'
+import Mustache from 'mustache'
+import { createDashboardRenderer, dashboardCopy, dashboardPartials, type DashboardFire } from './dashboard-view.ts'
 import pageTemplate from '../templates/dashboard.html?raw'
 
 export const DASHBOARD_SCRIPT_PATH = '/plugins/dsh-sentinel/dashboard.js'
@@ -26,11 +26,10 @@ export function dashboardHtml(
 ): string {
   const copy = dashboardCopy[locale]
   const render = createDashboardRenderer(locale)
-  return renderTemplate(pageTemplate, {
+  return Mustache.render(pageTemplate, {
     lang: locale === 'zh' ? 'zh-CN' : 'en', title: copy.title, firesTitle: copy.firesTitle, watchesTitle: copy.watchesTitle,
     scriptPath: DASHBOARD_SCRIPT_PATH,
-  }, {
-    'watch-headings': render.headings(copy.heads), 'fire-headings': render.headings(copy.fireHeads),
-    watches: render.rows(rows, dropped), fires: render.fires(fires),
-  })
+    watchHeadings: copy.heads.map(label => ({ label })), fireHeadings: copy.fireHeads.map(label => ({ label })),
+    ...render.watchModel(rows, dropped), ...render.fireModel(fires),
+  }, dashboardPartials)
 }

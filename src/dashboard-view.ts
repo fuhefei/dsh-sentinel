@@ -1,6 +1,8 @@
 import type { WatchRow } from './index.ts'
 import { createPresentation, messages, type FireMessage, type Locale } from './locale.ts'
-import { joinHtml, renderTemplate, type RenderedHtml } from './dashboard-template.ts'
+import Mustache from 'mustache'
+import watchRowsTemplate from '../templates/dashboard-watches.html?raw'
+import fireRowsTemplate from '../templates/dashboard-fires.html?raw'
 import watchTemplate from '../templates/dashboard-watch.html?raw'
 import fireTemplate from '../templates/dashboard-fire.html?raw'
 import emptyTemplate from '../templates/dashboard-empty.html?raw'
@@ -37,7 +39,14 @@ export interface DashboardState {
   readonly duty?: { ageMs: number; stale: boolean } | null
 }
 
-/** Normal typed imports share the same templates and formatting between SSR and the browser. */
+/** Static, checked-in partials only; caller data is never interpreted as a template. */
+export const dashboardPartials = {
+  watchRows: watchRowsTemplate, fireRows: fireRowsTemplate,
+  watch: watchTemplate, fire: fireTemplate, empty: emptyTemplate,
+  heading: headingTemplate, badge: badgeTemplate, pattern: patternTemplate,
+}
+
+/** Share plain presentation models and Mustache templates between SSR and the browser. */
 export function createDashboardRenderer(locale: Locale) {
   const copy = dashboardCopy[locale]
   const presentation = createPresentation(locale, messages[locale])
@@ -45,11 +54,10 @@ export function createDashboardRenderer(locale: Locale) {
     (token, key: string) => values[key] === undefined ? token : String(values[key]))
   const time = (value?: string): string => (value === undefined ? new Date() : new Date(value))
     .toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en')
-  const badge = (kind: 'pending' | 'dropped', count: number): RenderedHtml => count > 0
-    ? renderTemplate(badgeTemplate, { kind, label: fill(copy[kind], { n: count }) }) : joinHtml([])
-  const rows = (watches: readonly WatchRow[], dropped: Readonly<Record<string, number>> = {}): RenderedHtml => {
-    if (watches.length === 0) return renderTemplate(emptyTemplate, { columns: 9, message: copy.empty })
-    return joinHtml(watches.map(row => renderTemplate(watchTemplate, {
+  const badge = (kind: 'pending' | 'dropped', count: number) => count > 0
+    ? { kind, label: fill(copy[kind], { n: count }) } : null
+  const watchModel = (watches: readonly WatchRow[], dropped: Readonly<Record<string, number>> = {}) => ({
+    watches: watches.map(row => ({
       session: row.sessionId.slice(0, 16), sessionId: row.sessionId,
       live: row.live ? copy.live : copy.dormant,
       id: row.id, kind: row.kind, note: row.note, target: row.target,
@@ -58,22 +66,27 @@ export function createDashboardRenderer(locale: Locale) {
       next: row.kind === 'webhook' ? copy.push
         : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…',
       cancel: copy.cancel,
-    }, {
       dropped: badge('dropped', dropped[row.sessionId] ?? 0),
       pending: badge('pending', row.pendingWakeups),
-      pattern: row.pattern === undefined ? renderTemplate('—', {}) : renderTemplate(patternTemplate, { pattern: row.pattern }),
-    })))
-  }
-  const fires = (facts: readonly DashboardFire[]): RenderedHtml => facts.length === 0
-    ? renderTemplate(emptyTemplate, { columns: 4, message: copy.firesEmpty })
-    : joinHtml(facts.map(fire => renderTemplate(fireTemplate, {
+      // An empty regex is present and must not be confused with an omitted pattern.
+      patternView: row.pattern === undefined ? null : { pattern: row.pattern },
+    })),
+    emptyWatches: { columns: 9, message: copy.empty },
+  })
+  const fireModel = (facts: readonly DashboardFire[]) => ({
+    fires: facts.map(fire => ({
       time: time(fire.at), id: fire.id, session: fire.sessionId.slice(0, 16), summary: presentation.formatFireSummary(fire),
-    })))
+    })),
+    emptyFires: { columns: 4, message: copy.firesEmpty },
+  })
+  const rows = (watches: readonly WatchRow[], dropped: Readonly<Record<string, number>> = {}): string =>
+    Mustache.render(watchRowsTemplate, watchModel(watches, dropped), dashboardPartials)
+  const fires = (facts: readonly DashboardFire[]): string =>
+    Mustache.render(fireRowsTemplate, fireModel(facts), dashboardPartials)
   const meta = (count: number, duty?: DashboardState['duty']): string => {
     const dutyText = duty == null ? copy.dutyNone
       : fill(duty.stale ? copy.dutyStale : copy.duty, { age: Math.max(0, Math.round(duty.ageMs / 1000)) })
     return `· ${fill(copy.count, { n: count })} · ${dutyText} · ${time()}`
   }
-  const headings = (labels: readonly string[]): RenderedHtml => joinHtml(labels.map(label => renderTemplate(headingTemplate, { label })))
-  return { rows, fires, meta, headings }
+  return { rows, fires, meta, watchModel, fireModel }
 }

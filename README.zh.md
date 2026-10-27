@@ -67,7 +67,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 例如，英文界面会显示 `Snapshot changed (state: exit 0)`，而不是 `快照发生变化（状态: exit 0）`，不受服务端消息语言影响。
 
-独立页面在服务端渲染仓库中的 `templates/*.html`，因此禁用 JavaScript 时仍有初始表格。普通插槽对 HTML 文本和带引号属性进行转义，片段插槽只接受可信模板渲染器的输出。浏览器通过独立构建的 `lib/dashboard.js`（`defer` 加载）导入同一套类型检查过的行渲染器和模板，不再使用可执行内联脚本、函数序列化或 DSH 浏览器启动上下文。模板导入在构建时内嵌，原始模板和编译后的浏览器资源也随包发布。
+独立页面使用 [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0) 在服务端渲染仓库中的 `templates/*.html`，因此禁用 JavaScript 时仍有初始表格。标准 section 和静态 partial 组合页面，所有值均使用 Mustache 默认的 HTML 转义，适用于文本和带引号属性；不使用原始 HTML 插值、调用方提供的模板或模板函数。浏览器通过独立构建的 [dashboard 资源](lib/dashboard.js)（`defer` 加载）导入同一套类型检查过的展示模型和模板。Mustache 同时打包进服务端入口和独立浏览器资源，不需要可执行内联脚本、运行时代码生成、函数序列化或 DSH 浏览器启动上下文。模板导入在构建时内嵌，原始模板、编译后的浏览器资源和[第三方许可证声明](THIRD_PARTY_NOTICES.md) 随包发布。缺失的模板键遵循 Mustache 标准语义（输出空字符串）；必需的展示字段由类型化模型和模板契约测试覆盖，不再自建运行时模板校验器。
 
 ## 工具
 

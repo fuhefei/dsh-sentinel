@@ -38,9 +38,10 @@ either broken once or is one edit away from breaking.
    notes, regexes, matches or protocol fields. Legacy summaries remain readable;
    unknown or ambiguous text must pass through rather than being guessed or
    rewritten. Follow the host's registered fallback chain for custom languages.
-   Dashboard markup belongs in checked-in HTML templates. Escape scalar slots
-   for text/quoted attributes and accept HTML fragment slots only from the
-   trusted template renderer; never re-evaluate inserted caller data. Browser
+   Dashboard markup belongs in checked-in Mustache HTML templates. Keep the
+   default HTML escaping for text/quoted attributes and compose static partials
+   with plain presentation models, never raw-HTML slots, template functions or
+   caller-provided template source. Never re-evaluate inserted caller data. Browser
    behavior is a separately built, self-contained TypeScript entry, not inline
    JavaScript or serialized functions. Test initial HTML, the actual browser
    asset and packed-package routes independently of the source checkout.

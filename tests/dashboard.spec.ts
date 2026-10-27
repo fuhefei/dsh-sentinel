@@ -1,3 +1,4 @@
+import Mustache from 'mustache'
 import { describe, expect, it } from 'vitest'
 import { dashboardHtml, DASHBOARD_SCRIPT_PATH, localizeState } from '../src/dashboard.ts'
 import type { WatchRow } from '../src/index.ts'
@@ -44,7 +45,7 @@ describe('dashboardHtml', () => {
   it('loads only the standalone deferred browser asset, with no executable inline script', () => {
     const html = dashboardHtml([])
     expect(html.match(/<script\b[^>]*>[\s\S]*?<\/script>/g)).toEqual([
-      `<script src="${DASHBOARD_SCRIPT_PATH}" defer></script>`,
+      `<script src="${Mustache.escape(DASHBOARD_SCRIPT_PATH)}" defer></script>`,
     ])
     expect(html).not.toContain('const presentation')
     expect(html).not.toContain('setInterval(')
@@ -78,7 +79,7 @@ describe('dashboardHtml', () => {
       sessionId: row().sessionId, id: 'watch-1', at: '2026-01-01T00:00:00.000Z', summary: '模式 /x/ 开始匹配: <b>y</b>',
     }], { [row().sessionId]: 3 }, 'zh')
     expect(html).toContain('<h2 id="firesTitle">最近触发</h2>')
-    expect(html).toContain('&lt;b&gt;y&lt;/b&gt;')
+    expect(html).toContain(Mustache.escape('<b>y</b>'))
     expect(html).toContain('已丢弃 3 唤醒')
   })
 
@@ -95,7 +96,7 @@ describe('dashboardHtml', () => {
     expect(html).not.toContain('<script>alert(1)</script>')
     expect(html).not.toContain('<img src=x')
     expect(html).not.toContain('<b>bold</b>')
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;')
+    expect(html).toContain(Mustache.escape('<script>alert(1)</script>'))
   })
 
   it('does not reinterpret template markers or replacement tokens inside caller text', () => {

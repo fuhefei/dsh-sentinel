@@ -30,15 +30,15 @@
 <h1><span id="title">👁 {{title}}</span> <small id="meta"></small></h1>
 <div class="table-scroll" role="region" aria-label="{{watchesTitle}}" tabindex="0">
 <table>
-<thead><tr><!-- sentinel:watch-headings --></tr></thead>
-<tbody id="rows"><!-- sentinel:watches --></tbody>
+<thead><tr>{{#watchHeadings}}{{> heading}}{{/watchHeadings}}</tr></thead>
+<tbody id="rows">{{> watchRows}}</tbody>
 </table>
 </div>
 <h2 id="firesTitle">{{firesTitle}}</h2>
 <div class="table-scroll" role="region" aria-label="{{firesTitle}}" tabindex="0">
 <table>
-<thead><tr><!-- sentinel:fire-headings --></tr></thead>
-<tbody id="fires"><!-- sentinel:fires --></tbody>
+<thead><tr>{{#fireHeadings}}{{> heading}}{{/fireHeadings}}</tr></thead>
+<tbody id="fires">{{> fireRows}}</tbody>
 </table>
 </div>
 </body>
