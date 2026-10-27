@@ -139,7 +139,7 @@ export interface FireFact {
   readonly before: string
   /** Snapshot excerpt after the transition. */
   readonly after: string
-  /** Probe duration in milliseconds. */
+  /** Probe duration in milliseconds; legacy wall-clock measurements can be negative after a clock correction. */
   readonly probeMs: number
 }
 
@@ -267,13 +267,34 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     if (typeof id !== 'string' || typeof at !== 'string' || !isRecord(fact)) {
       throw new SentinelLogError('fired change must carry id, at, and fact')
     }
-    const trigger = fact['trigger']
-    if (trigger !== undefined && (!isRecord(trigger)
-      || (trigger['kind'] !== 'change' && trigger['kind'] !== 'webhook'
-        && !(trigger['kind'] === 'pattern' && typeof trigger['pattern'] === 'string' && typeof trigger['match'] === 'string')))) {
-      throw new SentinelLogError('fire trigger must be change, webhook, or pattern with string pattern and match')
+    const fireNumber = fact['fireNumber']
+    const summary = fact['summary']
+    const before = fact['before']
+    const after = fact['after']
+    const probeMs = fact['probeMs']
+    if (typeof fireNumber !== 'number' || !Number.isFinite(fireNumber) || !Number.isInteger(fireNumber) || fireNumber < 1) {
+      throw new SentinelLogError('fire number must be a positive finite integer')
     }
-    if (fact['state'] !== undefined && typeof fact['state'] !== 'string') {
+    if (typeof summary !== 'string' || typeof before !== 'string' || typeof after !== 'string') {
+      throw new SentinelLogError('fire fact must carry string summary, before, and after')
+    }
+    if (typeof probeMs !== 'number' || !Number.isFinite(probeMs)) {
+      throw new SentinelLogError('fire probeMs must be a finite number')
+    }
+    const rawTrigger = fact['trigger']
+    let trigger: FireTrigger | undefined
+    if (rawTrigger !== undefined) {
+      if (isRecord(rawTrigger) && (rawTrigger['kind'] === 'change' || rawTrigger['kind'] === 'webhook')) {
+        trigger = { ...rawTrigger, kind: rawTrigger['kind'] }
+      } else if (isRecord(rawTrigger) && rawTrigger['kind'] === 'pattern'
+        && typeof rawTrigger['pattern'] === 'string' && typeof rawTrigger['match'] === 'string') {
+        trigger = { ...rawTrigger, kind: 'pattern', pattern: rawTrigger['pattern'], match: rawTrigger['match'] }
+      } else {
+        throw new SentinelLogError('fire trigger must be change, webhook, or pattern with string pattern and match')
+      }
+    }
+    const state = fact['state']
+    if (state !== undefined && typeof state !== 'string') {
       throw new SentinelLogError('fire state must be a string when present')
     }
     const observed = value['observed']
@@ -282,7 +303,12 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
       change: 'fired',
       id,
       at,
-      fact: fact as unknown as FireFact,
+      fact: {
+        ...fact,
+        fireNumber, summary, before, after, probeMs,
+        ...(trigger !== undefined ? { trigger } : {}),
+        ...(state !== undefined ? { state } : {}),
+      },
       ...(observed !== undefined ? { observed: decodeObserved(observed) } : {}),
     }
   }

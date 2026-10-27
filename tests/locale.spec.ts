@@ -1,6 +1,6 @@
 import { runInNewContext } from 'node:vm'
 import { describe, expect, it } from 'vitest'
-import { createPresentation, formatFireSummary, localizeState, messages, resolveLocale, translate, type FireMessage } from '../src/locale.ts'
+import { createPresentation, formatFireSummary, localizeState, messages, negotiateLocale, resolveLocale, translate, type FireMessage } from '../src/locale.ts'
 import { shouldFire } from '../src/sensors.ts'
 
 const cases: ReadonlyArray<{ fact: FireMessage; en: string; zh: string }> = [
@@ -18,6 +18,30 @@ describe('presentation locale', () => {
   it('normalizes supported tags with an English fallback', () => {
     for (const tag of [undefined, '', 'en', 'en-US', 'ru-RU', 'zhang', '<script>']) expect(resolveLocale(tag)).toBe('en')
     for (const tag of ['zh', 'zh-CN', 'zh-TW', 'ZH-hans']) expect(resolveLocale(tag)).toBe('zh')
+  })
+
+  it.each([
+    ['zh-CN;q=0,en-US;q=1', 'en'],
+    ['en;q=0.1,zh;q=1', 'zh'],
+    ['fr,zh;q=0.9', 'zh'],
+    ['en;q=0.7,zh;q=0.7', 'en'],
+    ['zh;q=0.7,en;q=0.7', 'zh'],
+    [' zh-Hant ; q=0.9, EN-us;q=0.5 ', 'zh'],
+    ['zh;q=garbage,en;q=0.9', 'en'],
+    ['zh;q=1.5,en;q=0.5', 'en'],
+    ['en;q=0,*;q=1', 'zh'],
+    ['zh;q=0,*;q=1', 'en'],
+    ['*', 'zh'],
+    ['ru-RU', 'en'],
+    ['en;q=0,zh;q=0', 'en'],
+  ] as const)('negotiates weighted dashboard preferences %s', (header, expected) => {
+    expect(negotiateLocale(header, 'zh')).toBe(expected)
+  })
+
+  it('uses server locale only when no request preference is supplied', () => {
+    expect(negotiateLocale(undefined, 'zh')).toBe('zh')
+    expect(negotiateLocale('  ', 'zh')).toBe('zh')
+    expect(negotiateLocale(undefined)).toBe('en')
   })
 
   it('keeps dictionary keys and interpolation placeholders balanced', () => {

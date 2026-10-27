@@ -210,9 +210,45 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(await render('?lang=zh', 'en-US')).toContain('<html lang="zh-CN">')
     expect(await render('', 'en-US,en;q=0.9')).toContain('<html lang="en">')
     expect(await render('', 'zh-TW')).toContain('<html lang="zh-CN">')
+    expect(await render('', 'zh-CN;q=0,en-US;q=1')).toContain('<html lang="en">')
+    expect(await render('', 'en;q=0.1,zh;q=1')).toContain('<html lang="zh-CN">')
+    expect(await render('', 'fr,zh;q=0.9')).toContain('<html lang="zh-CN">')
+    expect(await render('?lang=en', 'en;q=0,zh;q=1')).toContain('<html lang="en">')
     expect(await render('', 'ru-RU')).toContain('<html lang="en">')
     expect(await render('')).toContain('<html lang="zh-CN">')
     expect(await render('?lang=%3Cscript%3E')).toContain('<html lang="en">')
+  })
+
+  it('reports malformed legacy fire facts during sidecar loading without an unhandled render failure', async () => {
+    await freshHome()
+    const at = '2026-10-27T00:00:00.000Z'
+    const rows = [
+      {
+        v: 1, sessionId: 'corrupt-session', change: {
+          version: 1, change: 'created', subscription: {
+            id: 'watch-1', spec: { kind: 'webhook', target: 'corrupt-event', intervalSeconds: 30 },
+            note: 'preserve the persisted data', maxFires: 1, cooldownSeconds: 60, createdAt: at,
+          },
+        },
+      },
+      {
+        v: 1, sessionId: 'corrupt-session', change: {
+          version: 1, change: 'fired', id: 'watch-1', at,
+          fact: { fireNumber: 1, summary: null, before: '', after: 'ready', probeMs: 0 },
+        },
+      },
+    ]
+    const original = rows.map(row => JSON.stringify(row)).join('\n') + '\n'
+    await writeFile(storePath(), original)
+    const warnings: string[] = []
+    const harness = makeHarness()
+    harnesses.push(harness)
+    harness.rootCtx['logger'] = { warn: (message: string) => { warnings.push(message) } }
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 50 })
+    await expect.poll(() => warnings.some(message => message.includes('sidecar log load failed: fire fact must carry string summary, before, and after'))).toBe(true)
+    expect(harness.followups).toEqual([])
+    expect(await readFile(storePath(), 'utf8')).toBe(original)
+    // Vitest also fails this test if startup leaves the old unhandled TypeError.
   })
 
   it('finishes an in-flight duty claim before disposal returns', async () => {

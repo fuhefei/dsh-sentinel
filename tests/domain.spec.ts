@@ -190,6 +190,45 @@ describe('foldSentinelEvents', () => {
 })
 
 describe('decodeSentinelChange', () => {
+  it.each([
+    ['summary', undefined], ['summary', null], ['summary', 42], ['summary', {}], ['summary', []],
+    ['before', undefined], ['before', null], ['before', 42],
+    ['after', undefined], ['after', null], ['after', {}],
+    ['fireNumber', undefined], ['fireNumber', null], ['fireNumber', 0], ['fireNumber', -1],
+    ['fireNumber', 1.5], ['fireNumber', Number.NaN], ['fireNumber', Number.POSITIVE_INFINITY], ['fireNumber', '1'],
+    ['probeMs', undefined], ['probeMs', null], ['probeMs', Number.NaN],
+    ['probeMs', Number.POSITIVE_INFINITY], ['probeMs', '0'],
+  ] as const)('rejects malformed fire field %s=%j before rendering', (field, value) => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
+    expect(() => decodeSentinelChange({ ...legacy, fact: { ...legacy.fact, [field]: value } }))
+      .toThrow(SentinelLogError)
+  })
+
+  it('accepts empty excerpts, fractional nonnegative timings and known structured triggers', () => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
+    for (const trigger of [{ kind: 'change' }, { kind: 'webhook' }, { kind: 'pattern', pattern: '准备', match: '' }]) {
+      const row = { ...legacy, fact: { ...legacy.fact, summary: '', before: '', after: '', probeMs: 0.25, trigger, state: 'exit 0' } }
+      expect(decodeSentinelChange(row)).toEqual(row)
+    }
+  })
+
+  it('keeps finite legacy timings after a backward wall-clock correction readable', () => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
+    const row = { ...legacy, fact: { ...legacy.fact, probeMs: -1000.25 } }
+    expect(decodeSentinelChange(row)).toEqual(row)
+  })
+
+  it('preserves unknown fire metadata while validating the fields it consumes', () => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
+    for (const trigger of [
+      { kind: 'change', futureSource: { revision: 2 } },
+      { kind: 'pattern', pattern: '准备', match: '准备', futureSource: ['external'] },
+    ]) {
+      const row = { ...legacy, fact: { ...legacy.fact, trigger, futureMetadata: { language: 'other', values: [1, 'x'] } } }
+      expect(decodeSentinelChange(row)).toEqual(row)
+    }
+  })
+
   it('keeps legacy fires readable and round-trips optional neutral trigger data', () => {
     const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
     expect(decodeSentinelChange(legacy)).toEqual(legacy)

@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { LocaleSnapshot } from '@deepseek-ai/dsh-client-locale/client'
-import type { ReactElement, ReactNode } from 'react'
+import { createElement, type ComponentType, type ReactElement } from 'react'
+import { act, create, type ReactTestRenderer, type ReactTestRendererJSON } from 'react-test-renderer'
 import { createClientLocaleSource, resolveClientLocale } from '../src/client/locale.ts'
 import { apply } from '../src/client/index.tsx'
-import { createPoller } from '../src/client/poller.ts'
 
-const fixtures = vi.hoisted(() => ({
+const fixtures = {
   watches: [{
     sessionId: 'session-1', live: true, id: 'watch-1', kind: 'file', target: '/tmp/用户.txt',
     intervalSeconds: 30, note: '用户提供的便签', fireCount: 1, maxFires: 2, lastState: 'absent',
@@ -21,44 +21,50 @@ const fixtures = vi.hoisted(() => ({
     summary: '快照发生变化（状态: absent）',
     note: 'legacy note', before: 'old data', after: 'new data',
   }],
-}))
-
-// Evaluate the component tree without adding a DOM/test-renderer dependency.
-// Hooks are controlled here; the actual components, host bindings and formatters run.
-vi.mock('react', async (importOriginal) => ({
-  ...await importOriginal<typeof import('react')>(),
-  useEffect: vi.fn(),
-  useState: (initial: unknown) => [
-    typeof initial === 'boolean' ? true
-      : typeof initial === 'object' && initial !== null && 'watches' in initial ? fixtures : initial,
-    vi.fn(),
-  ],
-  useSyncExternalStore: (_subscribe: unknown, getSnapshot: () => unknown) => getSnapshot(),
-}))
-vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({ StateDot: () => null }))
-vi.mock('../src/client/poller.ts', () => ({
-  createPoller: vi.fn(() => ({ running: false, start: vi.fn(), stop: vi.fn() })),
-}))
-
-interface View {
-  text: string
-  hrefs: string[]
 }
 
-function render(node: ReactNode): View {
-  if (node === null || node === undefined || typeof node === 'boolean') return { text: '', hrefs: [] }
-  if (typeof node === 'string' || typeof node === 'number') return { text: String(node), hrefs: [] }
-  if (Array.isArray(node)) {
-    const children = node.map(render)
-    return { text: children.map(child => child.text).join(''), hrefs: children.flatMap(child => child.hrefs) }
+// Keep the host primitive outside this test; React hooks and Sentinel pollers are real.
+vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => ({ StateDot: () => null }))
+
+const mounted = new Set<ReactTestRenderer>()
+const hosts: Array<{ readonly listenerCount: number; dispose(): void }> = []
+const disconnect = vi.fn()
+
+async function mount(element: ReactElement): Promise<ReactTestRenderer> {
+  let renderer!: ReactTestRenderer
+  await act(async () => {
+    renderer = create(element)
+    mounted.add(renderer)
+  })
+  return renderer
+}
+
+async function unmount(renderer: ReactTestRenderer): Promise<void> {
+  await act(async () => { renderer.unmount() })
+  mounted.delete(renderer)
+}
+
+function textOf(node: ReactTestRendererJSON | ReactTestRendererJSON[] | string | null): string {
+  if (node === null) return ''
+  if (typeof node === 'string') return node
+  if (Array.isArray(node)) return node.map(textOf).join('')
+  return (node.children ?? []).map(textOf).join('')
+}
+
+function view(renderer: ReactTestRenderer) {
+  return {
+    text: textOf(renderer.toJSON()),
+    hrefs: renderer.root.findAllByType('a').map(link => link.props.href as string),
   }
-  const element = node as ReactElement<{ children?: ReactNode; href?: string }>
-  if (typeof element.type === 'function') {
-    return render((element.type as (props: typeof element.props) => ReactNode)(element.props))
-  }
-  const result = render(element.props.children)
-  if (element.props.href !== undefined) result.hrefs.push(element.props.href)
-  return result
+}
+
+async function expandFires(renderer: ReactTestRenderer): Promise<void> {
+  await act(async () => {
+    for (const row of renderer.root.findAll(node => node.type === 'div'
+      && typeof node.props.onMouseEnter === 'function' && typeof node.props.onClick === 'function')) {
+      row.props.onClick()
+    }
+  })
 }
 
 function host(active = 'en', locales: LocaleSnapshot['locales'] = [
@@ -67,33 +73,47 @@ function host(active = 'en', locales: LocaleSnapshot['locales'] = [
   let snapshot: LocaleSnapshot = { active, locales, revision: 0 }
   let dictionaries: Record<string, Record<string, string>> = {}
   const listeners = new Set<() => void>()
+  const disposers: Array<() => void> = []
   const locale = {
     getSnapshot() { return snapshot },
-    subscribe(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } },
-    register: vi.fn((_namespace, dicts: typeof dictionaries) => { dictionaries = dicts; return () => {} }),
+    subscribe: vi.fn((listener: () => void) => {
+      listeners.add(listener)
+      return () => { listeners.delete(listener) }
+    }),
+    register: vi.fn((_namespace, dicts: typeof dictionaries) => {
+      dictionaries = dicts
+      return () => { dictionaries = {} }
+    }),
     bind: vi.fn(() => (key: string, values: Record<string, unknown> = {}) => {
-      let id: string | undefined = snapshot.active
+      const definitionFor = (id: string) => snapshot.locales.find(definition => definition.id.toLowerCase() === id.toLowerCase())
+      let current = definitionFor(snapshot.active)
       const visited = new Set<string>()
       let template: string | undefined
-      while (id !== undefined && !visited.has(id)) {
+      while (current !== undefined && !visited.has(current.id.toLowerCase())) {
+        const id = current.id.toLowerCase()
         visited.add(id)
         template = dictionaries[id]?.[key]
         if (template !== undefined) break
-        id = snapshot.locales.find(definition => definition.id === id)?.fallback
+        current = current.fallback === undefined ? undefined : definitionFor(current.fallback)
       }
       return (template ?? dictionaries.en![key]!).replace(/\{(\w+)\}/g, (token, name: string) =>
         values[name] === undefined ? token : String(values[name]))
     }),
   }
-  const slots = new Map<string, { spec: { label?: () => string }; component: (props: object) => ReactNode }>()
-  let tab: { title: () => string; component: () => ReactNode }
+  const slots = new Map<string, { spec: { label?: () => string }; component: ComponentType<Record<string, unknown>> }>()
+  let tab: { title: () => string; component: ComponentType }
   const ctx = {
     locale,
-    effect: (callback: () => unknown) => callback(),
+    effect: (callback: () => (() => void) | void) => {
+      const dispose = callback()
+      if (dispose !== undefined) disposers.push(dispose)
+      return dispose
+    },
     slots: {
       inject: (_name: string, callback: () => unknown) => callback(),
-      register: (spec: { name: string; label?: () => string }, component: (props: object) => ReactNode) => {
+      register: (spec: { name: string; label?: () => string }, component: ComponentType<Record<string, unknown>>) => {
         slots.set(spec.name, { spec, component })
+        return () => { slots.delete(spec.name) }
       },
     },
     plugin: ({ apply: activate }: { apply: (context: object) => void }) => activate({
@@ -101,7 +121,7 @@ function host(active = 'en', locales: LocaleSnapshot['locales'] = [
     }),
   }
   apply(ctx as unknown as Context)
-  return {
+  const result = {
     locale, slots,
     get tab() { return tab! },
     t: locale.bind(),
@@ -109,23 +129,41 @@ function host(active = 'en', locales: LocaleSnapshot['locales'] = [
       snapshot = { ...snapshot, active: next, revision: snapshot.revision + 1 }
       for (const listener of listeners) listener()
     },
-    setLocales(locales: LocaleSnapshot['locales']) {
-      snapshot = { ...snapshot, locales, revision: snapshot.revision + 1 }
+    setLocales(next: LocaleSnapshot['locales']) {
+      snapshot = { ...snapshot, locales: next, revision: snapshot.revision + 1 }
       for (const listener of listeners) listener()
     },
     get listenerCount() { return listeners.size },
+    dispose() { for (const dispose of disposers.splice(0).reverse()) dispose() },
   }
+  hosts.push(result)
+  return result
 }
 
-const pollGlobalState = vi.mocked(createPoller).mock.calls[0]![0].run
-
-beforeEach(async () => {
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+  vi.setSystemTime(new Date('2026-01-01T01:02:03.000Z'))
   vi.stubGlobal('navigator', { language: 'zh-CN' })
   vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => fixtures })))
-  // Populate the real shared global-watch store without arming timers.
-  await pollGlobalState(new AbortController().signal)
+  vi.stubGlobal('document', { body: {}, querySelector: () => ({}) })
+  vi.stubGlobal('MutationObserver', class {
+    observe() {}
+    disconnect() { disconnect() }
+  })
+  disconnect.mockClear()
 })
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks() })
+afterEach(async () => {
+  await act(async () => { for (const renderer of mounted) renderer.unmount() })
+  mounted.clear()
+  for (const client of hosts.splice(0)) {
+    expect(client.listenerCount).toBe(0)
+    client.dispose()
+  }
+  expect(vi.getTimerCount()).toBe(0)
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 describe('client host locale', () => {
   it.each([
@@ -155,11 +193,13 @@ describe('client host locale', () => {
     expect(notify).toHaveBeenCalledOnce()
   })
 
-  it('uses English host copy for sidebar title and body despite a Chinese browser', () => {
+  it('uses English host copy despite a Chinese browser and preserves expanded user data', async () => {
     const client = host('en')
     expect(client.tab.title()).toBe('Sentinel')
     expect(client.slots.get('sidebar.panellist')!.spec.label!()).toBe('Sentinel')
-    const body = render(client.tab.component())
+    const renderer = await mount(createElement(client.tab.component))
+    await expandFires(renderer)
+    const body = view(renderer)
     expect(body.text).toContain('Recent fires')
     expect(body.text).toContain('Pattern /READY/ started matching: READY (state: absent)')
     expect(body.text).toContain('Snapshot changed (state: absent)')
@@ -169,53 +209,86 @@ describe('client host locale', () => {
     expect(body.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=en')
   })
 
-  it('switches the same mounted tab bindings to Chinese, independent of browser language', () => {
+  it('updates one mounted tab on locale notifications without replacing it or resubscribing', async () => {
     vi.stubGlobal('navigator', { language: 'en-US' })
     const client = host('en')
-    const component = client.tab.component
-    client.setLocale('zh')
+    const renderer = await mount(createElement(client.tab.component))
+    await expandFires(renderer)
+    expect(client.listenerCount).toBe(1)
+    expect(client.locale.subscribe).toHaveBeenCalledOnce()
+    expect(view(renderer).text).toContain('Recent fires')
+    await act(async () => { client.setLocale('zh') })
     expect(client.tab.title()).toBe('哨兵监控')
-    const body = render(component())
+    const body = view(renderer)
     expect(body.text).toContain('最近触发')
     expect(body.text).toContain('模式 /READY/ 开始匹配: READY（状态: 不存在）')
     expect(body.text).toContain('便签：用户提供的便签')
     expect(body.text).toContain('不存在 · 触发 1/2')
     expect(body.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=zh')
+    expect(client.locale.subscribe).toHaveBeenCalledOnce()
+    await unmount(renderer)
+    expect(client.listenerCount).toBe(0)
   })
 
-  it('follows a language pack fallback chain consistently across every client surface', () => {
+  it('updates mounted surfaces when only fallback definitions change, retaining active locale', async () => {
     const client = host('ru', [
       { id: 'en', label: 'English' }, { id: 'zh', label: '中文', fallback: 'en' },
       { id: 'ru', label: 'Русский', fallback: 'fr' }, { id: 'fr', label: 'Français', fallback: 'en' },
     ])
-    const tab = client.tab.component
-    expect(render(tab()).text).toContain('Snapshot changed (state: absent)')
-    client.setLocales([
+    const renderers = [await mount(createElement(client.tab.component))]
+    for (const name of ['conversation.input.dock', 'main']) {
+      renderers.push(await mount(createElement(client.slots.get(name)!.component, { t: client.t, session: { sessionId: 'session-1' } })))
+    }
+    for (const renderer of renderers) expect(view(renderer).text).toContain('Snapshot changed (state: absent)')
+    const time = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockReturnValue('01:02:03')
+    await act(async () => { client.setLocales([
       { id: 'en', label: 'English' }, { id: 'zh', label: '中文', fallback: 'en' },
       { id: 'ru', label: 'Русский', fallback: 'fr' }, { id: 'fr', label: 'Français', fallback: 'zh' },
-    ])
+    ]) })
+    expect(client.locale.getSnapshot().active).toBe('ru')
     expect(client.tab.title()).toBe('哨兵监控')
-    const time = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockReturnValue('01:02:03')
-    const views = [render(tab()), ...['conversation.input.dock', 'main'].map(name =>
-      render(client.slots.get(name)!.component({ t: client.t, session: { sessionId: 'session-1' } })))]
-    for (const view of views) {
-      expect(view.text).toContain('最近触发')
-      expect(view.text).toContain('模式 /READY/ 开始匹配: READY（状态: 不存在）')
-      expect(view.text).toContain('不存在 · 触发 1/2')
-      expect(view.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=zh')
+    for (const renderer of renderers) {
+      const body = view(renderer)
+      expect(body.text).toContain('最近触发')
+      expect(body.text).toContain('模式 /READY/ 开始匹配: READY（状态: 不存在）')
+      expect(body.text).toContain('不存在 · 触发 1/2')
+      expect(body.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=zh')
     }
     expect(time).toHaveBeenCalledWith('zh')
   })
 
-  it('localizes dock and main-panel fire history and passes host locale to time formatting', () => {
+  it('localizes mounted dock and main-panel history and passes the host locale to time formatting', async () => {
     const client = host('en')
     const time = vi.spyOn(Date.prototype, 'toLocaleTimeString').mockReturnValue('01:02:03')
     for (const name of ['conversation.input.dock', 'main']) {
-      const view = render(client.slots.get(name)!.component({ t: client.t, session: { sessionId: 'session-1' } }))
-      expect(view.text).toContain('Pattern /READY/ started matching: READY (state: absent)')
-      expect(view.text).toContain('READY 用户数据')
-      expect(view.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=en')
+      const renderer = await mount(createElement(client.slots.get(name)!.component, { t: client.t, session: { sessionId: 'session-1' } }))
+      await expandFires(renderer)
+      const body = view(renderer)
+      expect(body.text).toContain('Pattern /READY/ started matching: READY (state: absent)')
+      expect(body.text).toContain('READY 用户数据')
+      expect(body.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=en')
     }
     expect(time).toHaveBeenCalledWith('en')
+  })
+
+  it('releases locale listeners, shared polling and dock observers as real components unmount', async () => {
+    const client = host('en')
+    const tab = await mount(createElement(client.tab.component))
+    const panel = await mount(createElement(client.slots.get('main')!.component, { t: client.t }))
+    const dock = await mount(createElement(client.slots.get('conversation.input.dock')!.component, { t: client.t, session: { sessionId: 'session-1' } }))
+    expect(client.listenerCount).toBe(3)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    await unmount(tab)
+    expect(client.listenerCount).toBe(2)
+    await act(async () => { client.setLocale('zh') })
+    expect(view(panel).text).toContain('最近触发')
+    expect(view(dock).text).toContain('最近触发')
+    await unmount(panel)
+    expect(client.listenerCount).toBe(1)
+    expect(vi.getTimerCount()).toBe(1)
+    await unmount(dock)
+    expect(client.listenerCount).toBe(0)
+    expect(disconnect).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
   })
 })

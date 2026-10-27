@@ -60,7 +60,7 @@ import {
 } from './domain.ts'
 import { probe, shouldFire } from './sensors.ts'
 import { SentinelStore, type FoldableRow } from './store.ts'
-import { formatFireSummary, localizeState, resolveLocale, translate, type FireMessage, type Locale } from './locale.ts'
+import { formatFireSummary, localizeState, negotiateLocale, resolveLocale, translate, type FireMessage, type Locale } from './locale.ts'
 import { dashboardHtml } from './dashboard.ts'
 export { dashboardHtml } from './dashboard.ts'
 // Preserve the public boolean-based helper while sharing presentation logic with the client.
@@ -931,7 +931,7 @@ class SentinelRuntime {
   }
 
   private async probeOne(watch: SessionWatch, sub: Subscription, state: ProbeState): Promise<void> {
-    const startedAt = Date.now()
+    const startedAt = performance.now()
     const result = await probe(sub.spec)
     if (this.disposed || !watch.folded.active.has(sub.id)) return
     const decision = shouldFire(sub.spec.pattern, state.lastSnapshot, result.snapshot)
@@ -965,7 +965,7 @@ class SentinelRuntime {
         state: result.state,
         before: clipExcerpt(previousSnapshot ?? ''),
         after: clipExcerpt(result.snapshot),
-        probeMs: Date.now() - startedAt,
+        probeMs: performance.now() - startedAt,
       }, { state: result.state, snapshot: result.snapshot })
     } catch (error: unknown) {
       // Keep the pre-fire baseline: the same transition re-fires next heartbeat.
@@ -1361,7 +1361,7 @@ function registerRoutes(runtime: SentinelRuntime, ctx: ContextLike, webServer: W
         const language = url.searchParams.get('lang')
         const accept = req.headers?.['accept-language']
         const locale = language !== null ? resolveLocale(language)
-          : resolveLocale((Array.isArray(accept) ? accept[0] : accept)?.split(',')[0]?.split(';')[0] ?? runtime.config.locale)
+          : negotiateLocale(Array.isArray(accept) ? accept.join(',') : accept, runtime.config.locale ?? 'en')
         res.end(dashboardHtml(rows, fires, dropped, locale))
       } catch (error: unknown) {
         res.writeHead(500, { 'content-type': 'text/plain; charset=utf-8' })

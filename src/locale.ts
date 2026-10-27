@@ -1,9 +1,36 @@
 /** Shared presentation helpers. Never translate probe snapshots or caller-owned text. */
 export type Locale = 'en' | 'zh'
 
-/** Host language tags normalize to the supported dictionaries; English is the fallback. */
+/** Normalize an explicit language tag; unknown tags use the English dictionary. */
 export function resolveLocale(value?: string): Locale {
   return /^zh(?:-|$)/i.test(value ?? '') ? 'zh' : 'en'
+}
+
+/** Negotiate the dashboard's two supported languages without treating unsupported tags as English. */
+export function negotiateLocale(acceptLanguage: string | undefined, fallback: Locale = 'en'): Locale {
+  if (acceptLanguage === undefined || acceptLanguage.trim() === '') return fallback
+  const preferences: Array<{ range: string; quality: number; order: number }> = []
+  for (const [order, entry] of acceptLanguage.split(',').entries()) {
+    const [rawRange = '', ...parameters] = entry.trim().split(/\s*;\s*/)
+    if (!/^(?:\*|[a-z]{1,8}(?:-[a-z0-9]{1,8})*)$/i.test(rawRange)) continue
+    let quality = 1
+    if (parameters.length > 0) {
+      const weight = parameters.length === 1 ? /^q=(0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/i.exec(parameters[0]!) : null
+      if (weight === null) continue
+      quality = Number(weight[1])
+    }
+    preferences.push({ range: rawRange.toLowerCase().split('-')[0]!, quality, order })
+  }
+  preferences.sort((a, b) => b.quality - a.quality || a.order - b.order)
+  const wildcard = preferences.find(preference => preference.range === '*')
+  const candidates = ([fallback, fallback === 'en' ? 'zh' : 'en'] as const).map(locale => {
+    // An explicit exclusion takes precedence over a wildcard for this language.
+    const preference = preferences.find(preference => preference.range === locale) ?? wildcard
+    return { locale, quality: preference?.quality ?? 0, order: preference?.order ?? Infinity }
+  })
+  candidates.sort((a, b) => b.quality - a.quality || a.order - b.order)
+  // As before, unsupported/unacceptable headers use the English UI, not a 406 page.
+  return candidates[0]!.quality > 0 ? candidates[0]!.locale : 'en'
 }
 
 /** Stable event data lets each viewer choose a language without rewriting the log. */
