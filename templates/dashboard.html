@@ -1,0 +1,18 @@
+<h1><span id="title">👁 {{title}}</span> <small id="meta"></small></h1>
+<div class="table-scroll" role="region" aria-label="{{watchesTitle}}" tabindex="0">
+<table>
+<thead><tr>{{#watchHeadings}}<th>{{label}}</th>{{/watchHeadings}}</tr></thead>
+<tbody id="rows">
+{{> watchRows}}
+</tbody>
+</table>
+</div>
+<h2 id="firesTitle">{{firesTitle}}</h2>
+<div class="table-scroll" role="region" aria-label="{{firesTitle}}" tabindex="0">
+<table>
+<thead><tr>{{#fireHeadings}}<th>{{label}}</th>{{/fireHeadings}}</tr></thead>
+<tbody id="fires">
+{{> fireRows}}
+</tbody>
+</table>
+</div>

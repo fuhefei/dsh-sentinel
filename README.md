@@ -41,6 +41,7 @@ All deployment-tunable knobs live in the plugin's config schema (defaults in par
 - id: dsh-sentinel
   name: dsh-sentinel
   config:
+    locale: en                  # server messages: en (default) or zh; UI follows the host
     heartbeatMs: 5000            # probe round interval
     probeConcurrency: 8          # in-flight probes per round
     maxSubscriptionsPerSession: 16
@@ -55,6 +56,30 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 
 `notifyWebhookUrl` fans every fire out of the harness as a JSON POST (`{plugin, event, sessionId, id, kind, target, note, fireNumber, maxFires, summary, after}`) — point it at a Lark/WeCom/Slack bot or any receiver. Delivery is at-most-once: a failed POST warns in the log and never blocks the in-harness wakeup.
 
+## Localization
+
+- The dock, global panel and optional better-sidebar tab follow the DSH language setting, including changes while they are open. They do not override it with the browser's language. English and Chinese are supported; other host languages follow their registered fallback chain to one of these dictionaries, with English as the final fallback.
+- The optional better-sidebar bottom-workbench tab can retain the title captured when it was opened. Its content updates live, but that saved tab-header title may require closing and reopening the tab after a language change; Sentinel does not modify third-party tab state.
+- Dashboard links carry the selected UI language as `?lang=en` or `?lang=zh`. A direct dashboard request negotiates supported `Accept-Language` ranges by quality (`q`) and request order, respecting explicit exclusions before wildcards. It uses the server `locale` when no preference is supplied, and English when no supplied preference is acceptable. The initial HTML and subsequent refreshes use the same language, including the page title, both table headers, sensor labels, timestamps and fire summaries.
+- Tools and background wakeups have no browser locale. Their receipts, instructions and notification summaries use the plugin's `locale` config (`en` by default, `zh` to retain Chinese server messages). Tool schemas, protocol fields and developer diagnostics remain English.
+- Fire events retain a readable `summary` for existing consumers and add optional language-neutral `trigger` and `state` fields. UI consumers format those fields in the viewer's language. Known legacy English/Chinese summaries are also displayed in that language without rewriting the sidecar; unknown or ambiguous summaries pass through unchanged.
+- Notes, targets, regexes, matched text, webhook payloads and before/after snapshots remain verbatim. Snapshot bytes and placeholder tokens are never translated, so localization cannot create a false transition or change regex matching.
+
+For example, an English UI now shows `Snapshot changed (state: exit 0)` instead of `快照发生变化（状态: exit 0）`, regardless of the server's message language.
+
+The standalone page uses [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0) and a small document/page/partial hierarchy:
+
+```text
+templates/layouts/document.html  document metadata and asset links
+  templates/dashboard.html      page structure and table headings
+    templates/dashboard/watches.html  watch rows and their empty state
+    templates/dashboard/fires.html    fire rows and their empty state
+```
+
+This is standard Mustache partial composition, not a custom inheritance extension. Small tags, badges and regex markup stay in their owning template instead of one-tag files. The server renders the complete initial tables; the browser reuses the same meaningful row partials and typed presentation models. All values use default Mustache escaping for text and quoted attributes; no raw-HTML slots, caller-provided templates or template functions are used. Missing keys follow standard Mustache semantics (empty output); model and template contract tests cover required presentation fields.
+
+Styles live in [the standalone stylesheet source](src/dashboard.css), copied by the build to [the shipped CSS asset](lib/dashboard.css) and linked from the document layout. [The separate browser script](lib/dashboard.js) is loaded with `defer`. The layout links the existing packaged SVG icon, avoiding a browser fallback request to a missing favicon. There are no inline styles or executable inline scripts, runtime code generation, serialized functions or dependencies on the DSH browser boot context. Mustache is bundled into the node and browser entries. Nested templates, CSS, JavaScript and the [third-party license notice](THIRD_PARTY_NOTICES.md) are all included in the npm package; initial HTML and styling do not require JavaScript.
+
 ## Tools
 
 - `sentinel_watch` — register a watch: `kind`, `target`, optional `pattern`, `interval` (1–3600s, default 30), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `ttl`.
@@ -65,9 +90,13 @@ Invalid values fail plugin load with a schema error rather than misbehaving at r
 
 - `GET /plugins/dsh-sentinel/state?sessionId=…` — read-only state for the dock and the sidebar panel (omit `sessionId` for every session).
 - `GET /plugins/dsh-sentinel/dashboard` — the server-global watch table.
+- `GET /plugins/dsh-sentinel/dashboard.js` — its self-contained browser script.
+- `GET /plugins/dsh-sentinel/dashboard.css` — its standalone stylesheet.
+- `GET /plugins/dsh-sentinel/icon.svg` — the existing package icon used as the page favicon.
+- These three fixed assets support `HEAD` with no body, reject other methods with 405, and use their own MIME types, `nosniff` and revalidation rather than immutable caching.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
-- All four routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
+- All routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
 
 First-probe semantics: a pattern-less watch absorbs its first observation as the baseline (no fire), while a pattern watch whose target already matches fires on the first probe — the condition already holds.
 
@@ -135,8 +164,8 @@ Install [dsh-notification](https://github.com/omdsh-dev/dsh-notification) alongs
 
 ```sh
 npm install
-npm run build     # tsc -b + tsdown (lib/index.js, lib/client.js)
-npm test          # vitest: domain fold/normalize, sensors, dashboard escaping, e2e wakeup flow
+npm run build     # tsc -b + tsdown (node, host client and standalone dashboard assets)
+npm test          # vitest: domain, sensors, React lifecycle, templates/browser, packed assets, e2e
 ```
 
 ## License

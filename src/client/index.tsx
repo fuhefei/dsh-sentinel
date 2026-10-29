@@ -22,6 +22,8 @@ import type { MainPanelId } from '@deepseek-ai/dsh-client-ui-layout/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { createPoller } from './poller.ts'
+import { createClientLocaleSource, useClientLocale, type ClientLocaleSource } from './locale.ts'
+import { formatFireSummary, localizeState, type FireMessage, type Locale } from '../locale.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
@@ -77,6 +79,7 @@ const zh = {
   'nofires': '尚未触发过',
   'panel': '哨兵监控',
   'noteLabel': '便签',
+  'noteSeparator': '：',
   'before': '之前',
   'after': '现在',
   'emptyHint': '让 agent 用 sentinel_watch 注册第一个监控。',
@@ -100,6 +103,7 @@ const en = {
   'nofires': 'No fires yet',
   'panel': 'Sentinel',
   'noteLabel': 'note',
+  'noteSeparator': ': ',
   'before': 'before',
   'after': 'after',
   'emptyHint': 'Ask the agent to register a watch with sentinel_watch.',
@@ -133,11 +137,10 @@ interface WireWatch {
   pendingWakeups?: number
 }
 
-interface WireFire {
+interface WireFire extends FireMessage {
   sessionId: string
   id: string
   at: string
-  summary: string
   note: string
   before: string
   after: string
@@ -291,8 +294,8 @@ function CancelButton(props: { watch: WireWatch; t: (key: SentinelKey) => string
 }
 
 /** One watch row: glyph, id, target, live state, budget, cadence. */
-function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Record<string, unknown>) => string }): ReactNode {
-  const { watch, t } = props
+function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Record<string, unknown>) => string; locale: Locale }): ReactNode {
+  const { watch, t, locale } = props
   const cadence = watch.kind === 'webhook'
     ? t('push')
     : `${t('next', { s: countdown(watch.nextDueAt) })}${watch.kind === 'file' ? ` · ${t('push')}` : ''}`
@@ -312,7 +315,7 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
         {watch.target}
       </span>
       <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-        {watch.lastState ?? t('probing')} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)} · {cadence}
+        {watch.lastState === undefined ? t('probing') : localizeState(watch.lastState, locale)} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)} · {cadence}
       </span>
       <CancelButton watch={watch} t={t} />
     </div>
@@ -324,8 +327,8 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
  * full wakeup context — the note the user left for themselves plus the
  * before → after snapshot transition (the transparency this plugin promises).
  */
-function FireRow(props: { fire: WireFire; t: (key: SentinelKey, values?: Record<string, unknown>) => string }): ReactNode {
-  const { fire, t } = props
+function FireRow(props: { fire: WireFire; t: (key: SentinelKey, values?: Record<string, unknown>) => string; locale: Locale }): ReactNode {
+  const { fire, t, locale } = props
   const [open, setOpen] = useState(false)
   const [hover, setHover] = useState(false)
   return (
@@ -346,15 +349,15 @@ function FireRow(props: { fire: WireFire; t: (key: SentinelKey, values?: Record<
         >
           <Icon name="chevron" size={11} />
         </span>
-        <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>{new Date(fire.at).toLocaleTimeString()}</span>
+        <span style={{ flex: 'none', whiteSpace: 'nowrap' }}>{new Date(fire.at).toLocaleTimeString(locale)}</span>
         <span style={{ flex: 'none' }}>{fire.id}</span>
-        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fire.summary}</span>
+        <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{formatFireSummary(fire, locale)}</span>
       </div>
       {open && (
         <div style={{ padding: '2px 12px 6px 30px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>
           <div style={{ marginBottom: 4 }}>
             <span style={{ fontWeight: 500 }}>{t('noteLabel')}</span>
-            {'：'}
+            {t('noteSeparator')}
             {fire.note}
           </div>
           <div style={{ display: 'flex', alignItems: 'stretch', gap: 8 }}>
@@ -380,9 +383,10 @@ function FireRow(props: { fire: WireFire; t: (key: SentinelKey, values?: Record<
 
 /** The dock card: header always, rows + fire history when expanded. */
 export function SentinelDock(
-  props: PropsRuntime<'conversation.input.dock'> & PropsLocale<'sentinel'>,
+  props: PropsRuntime<'conversation.input.dock'> & PropsLocale<'sentinel'> & { localeSource: ClientLocaleSource },
 ): ReactNode {
-  const { t, session } = props
+  const { t, session, localeSource } = props
+  const locale = useClientLocale(localeSource)
   const { watches, recentFires } = useSentinelState(session.sessionId)
   const [inChat, setInChat] = useState(false)
   const [open, setOpen] = useState(false)
@@ -432,7 +436,7 @@ export function SentinelDock(
           {watches.map(watch => watch.id).join(' ')}
         </span>
         <a
-          href={DASHBOARD_PATH}
+          href={`${DASHBOARD_PATH}?lang=${locale}`}
           target="_blank"
           rel="noreferrer"
           onClick={(e) => { e.stopPropagation() }}
@@ -455,13 +459,13 @@ export function SentinelDock(
         }}
       >
         <div style={{ padding: '4px 0' }}>
-          {watches.map(watch => <WatchRow key={watch.id} watch={watch} t={t} />)}
+          {watches.map(watch => <WatchRow key={watch.id} watch={watch} t={t} locale={locale} />)}
           <div style={{ padding: '4px 12px 2px', fontSize: 11, fontWeight: 500, color: 'var(--dsw-alias-label-caption)' }}>
             {t('history')}
           </div>
           {recentFires.length === 0
             ? <div style={{ padding: '0 12px 4px', fontSize: 12, color: 'var(--dsw-alias-label-caption)' }}>{t('nofires')}</div>
-            : recentFires.slice(0, 8).map(fire => <FireRow key={`${fire.id}-${fire.at}`} fire={fire} t={t} />)}
+            : recentFires.slice(0, 8).map(fire => <FireRow key={`${fire.id}-${fire.at}`} fire={fire} t={t} locale={locale} />)}
         </div>
       </div>
     </div>
@@ -500,29 +504,21 @@ export function SentinelPanelIcon({ size, active }: PropsRuntime<'sidebar.panell
  * declares no branch hole under session rows, so the cross-session view lives
  * in the panel its sidebar entry selects.
  */
-export function SentinelPanel({ t }: PropsRuntime<'main'> & PropsLocale<'sentinel'>): ReactNode {
-  return <SentinelWatchTable t={t} />
+export function SentinelPanel({ t, localeSource }: PropsRuntime<'main'> & PropsLocale<'sentinel'> & { localeSource: ClientLocaleSource }): ReactNode {
+  const locale = useClientLocale(localeSource)
+  return <SentinelWatchTable t={t} locale={locale} />
 }
 
-/**
- * better-sidebar tab view: the same table inside that third-party sidebar
- * workbench. better-sidebar's tab contract passes no locale props, so copy
- * falls back to the browser language (their documented guidance for consumer
- * tabs is plain strings / () => string).
- */
-export function SentinelTabView(): ReactNode {
-  const t = (key: SentinelKey, values?: Record<string, unknown>): string => {
-    const template = (navigator.language.startsWith('zh') ? zh : en)[key]
-    if (values === undefined) return template
-    return template.replace(/\{(\w+)\}/g, (match, name: string) =>
-      values[name] !== undefined ? String(values[name]) : match)
-  }
-  return <SentinelWatchTable t={t} />
+/** better-sidebar has no locale props; use the host translator and subscription. */
+export function SentinelTabView({ t, localeSource }: PropsLocale<'sentinel'> & { localeSource: ClientLocaleSource }): ReactNode {
+  const locale = useClientLocale(localeSource)
+  return <SentinelWatchTable t={t} locale={locale} />
 }
 
 /** The global watch table itself, shared by the panel and the better-sidebar tab. */
-function SentinelWatchTable({ t }: {
+function SentinelWatchTable({ t, locale }: {
   t: (key: SentinelKey, values?: Record<string, unknown>) => string
+  locale: Locale
 }): ReactNode {
   const watches = useGlobalWatches()
   const fires = useGlobalFires()
@@ -545,7 +541,7 @@ function SentinelWatchTable({ t }: {
           {t('count', { count: watches.length })}
         </span>
         <a
-          href={DASHBOARD_PATH}
+          href={`${DASHBOARD_PATH}?lang=${locale}`}
           target="_blank"
           rel="noreferrer"
           style={{ flex: 'none', fontSize: 11, color: 'var(--dsw-alias-label-caption)', textDecoration: 'none' }}
@@ -569,7 +565,7 @@ function SentinelWatchTable({ t }: {
           <div style={{ padding: '6px 12px 0', fontSize: 11, color: 'var(--dsw-alias-label-tertiary)' }}>
             {sessionId} · {group[0]?.live === true ? t('live') : t('dormant')}
           </div>
-          {group.map(watch => <WatchRow key={watch.id} watch={watch} t={t} />)}
+          {group.map(watch => <WatchRow key={watch.id} watch={watch} t={t} locale={locale} />)}
         </div>
       ))}
       {watches.length > 0 && (
@@ -583,7 +579,7 @@ function SentinelWatchTable({ t }: {
             {t('nofires')}
           </div>
         )
-        : fires.slice(0, 12).map(fire => <FireRow key={`${fire.sessionId}-${fire.id}-${fire.at}`} fire={fire} t={t} />)}
+        : fires.slice(0, 12).map(fire => <FireRow key={`${fire.sessionId}-${fire.id}-${fire.at}`} fire={fire} t={t} locale={locale} />)}
     </div>
   )
 }
@@ -600,13 +596,15 @@ export const inject = ['slots', 'locale']
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'sentinel: dictionaries')
   const t = ctx.locale.bind(NS)
+  const localeSource = createClientLocaleSource(ctx.locale)
   ctx.slots.inject('conversation.input.dock', () =>
     ctx.slots.register({
       name: 'conversation.input.dock',
       id: 'sentinel',
       order: 24,
       locale: NS,
-    }, SentinelDock))
+    }, (props: PropsRuntime<'conversation.input.dock'> & PropsLocale<'sentinel'>) =>
+      <SentinelDock {...props} localeSource={localeSource} />))
   // The cross-session view: a sidebar global-panel entry whose id is also the
   // layout's `main` key, so selecting the row shows this plugin's panel. Both
   // holes belong to plugins whose activation order is unconstrained against
@@ -624,7 +622,8 @@ export function apply(ctx: Context): void {
       name: 'main',
       key: SENTINEL_PANEL,
       locale: NS,
-    }, SentinelPanel))
+    }, (props: PropsRuntime<'main'> & PropsLocale<'sentinel'>) =>
+      <SentinelPanel {...props} localeSource={localeSource} />))
   // Soft integration with dsh-better-sidebar. betterSidebar stays out of the
   // static inject — a missing service would leave this plugin pending and take
   // the whole web boot down on hosts without better-sidebar. The tab mounts
@@ -638,11 +637,11 @@ export function apply(ctx: Context): void {
       const sidebar = (sidebarCtx as unknown as { betterSidebar: BetterSidebarLike }).betterSidebar
       ctx.effect(() => sidebar.registerTab({
         id: 'dsh-sentinel:watches',
-        title: () => (navigator.language.startsWith('zh') ? zh : en)['tab'],
+        title: () => t('tab'),
         icon: (size: number) => <Icon name="eye" size={Math.max(12, size - 2)} />,
         order: 60,
         single: true,
-        component: () => <SentinelTabView />,
+        component: () => <SentinelTabView t={t} localeSource={localeSource} />,
       }), 'sentinel: better-sidebar tab')
     },
   })

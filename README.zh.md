@@ -41,6 +41,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 - id: dsh-sentinel
   name: dsh-sentinel
   config:
+    locale: en                  # 服务端消息：en（默认）或 zh；界面跟随宿主
     heartbeatMs: 5000            # 探测轮间隔
     probeConcurrency: 8          # 每轮并发探测数
     maxSubscriptionsPerSession: 16
@@ -55,6 +56,30 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 `notifyWebhookUrl` 把每次触发以 JSON POST（`{plugin, event, sessionId, id, kind, target, note, fireNumber, maxFires, summary, after}`）送出 harness——指向飞书/企微/Slack 机器人或任意接收端都行。这条投递是 at-most-once：POST 失败只在日志里 warn，绝不阻塞 harness 内的唤醒。
 
+## 本地化
+
+- dock、全局面板及可选的 better-sidebar 标签页跟随 DSH 的语言设置，打开时切换语言也会更新，不再用浏览器语言覆盖宿主偏好。支持英文和中文，其他宿主语言沿注册的回退链查找这两种字典，最终回退到英文。
+- 可选的 better-sidebar 底部工作台标签可能保留打开时保存的标题。内容会实时更新，但切换语言后，该标签栏标题可能需要关闭并重新打开标签才会更新；Sentinel 不修改第三方标签状态。
+- dashboard 链接通过 `?lang=en` 或 `?lang=zh` 传递界面语言。直接访问时按 `Accept-Language` 的权重（`q`）和请求顺序协商支持的语言，明确排除优先于通配符。未提供偏好则使用服务端 `locale`，没有可接受的偏好时回退到英文。初始 HTML 和后续刷新使用同一语言，包括页面标题、两张表的表头、状态标签、时间和触发摘要。
+- 工具及后台唤醒没有浏览器语言上下文。其回执、指令和通知摘要使用插件配置 `locale`（默认 `en`，设置 `zh` 可保留中文服务端消息）。工具 schema、协议字段及开发诊断仍使用英文。
+- 触发事件保留兼容旧消费者的可读 `summary`，并新增可选的语言无关字段 `trigger` 和 `state`，界面按查看者语言格式化。已知的旧版中英文摘要也按所选语言展示，不重写 sidecar 日志；未知或无法明确解析的摘要原样保留。
+- 便签、目标、正则、匹配文本、webhook 载荷及前后快照保持原文。快照字节和占位符绝不翻译，因此本地化不会产生虚假变化或改变正则匹配。
+
+例如，英文界面会显示 `Snapshot changed (state: exit 0)`，而不是 `快照发生变化（状态: exit 0）`，不受服务端消息语言影响。
+
+独立页面使用 [Mustache.js 4.2.0](https://github.com/janl/mustache.js/tree/v4.2.0)，按文档、页面、表格局部模板组织：
+
+```text
+templates/layouts/document.html  文档元信息与资源链接
+  templates/dashboard.html      页面结构与表头
+    templates/dashboard/watches.html  监控行与空状态
+    templates/dashboard/fires.html    触发记录行与空状态
+```
+
+这是 Mustache 标准 partial 组合，不自建模板继承扩展。简单标签、badge 和正则标记直接保留在所属模板，不再拆成单标签文件。服务端渲染完整初始表格，浏览器复用同一套有实际职责的行模板和类型化展示模型。所有值均使用默认 HTML 转义，不使用原始 HTML 插槽、调用方模板或模板函数。缺失键输出空字符串，必需展示字段由模型与模板契约测试覆盖。
+
+样式位于[独立 CSS 源文件](src/dashboard.css)，构建时复制为[发布的 CSS 资源](lib/dashboard.css)，由文档布局通过 link 加载。[独立浏览器脚本](lib/dashboard.js) 使用 `defer`。布局链接包内现有 SVG 图标，避免浏览器请求不存在的默认 favicon。不使用内联样式、可执行内联脚本、运行时代码生成、函数序列化或 DSH 浏览器启动上下文。Mustache 打包进 node 和浏览器入口；嵌套模板、CSS、JavaScript 和[第三方许可证声明](THIRD_PARTY_NOTICES.md) 随 npm 包发布。初始 HTML 和样式不依赖 JavaScript。
+
 ## 工具
 
 - `sentinel_watch` — 注册 watch：`kind`、`target`、可选 `pattern`、`interval`（1–3600 秒，默认 30）、`note`（随每次唤醒原样送达）、`maxFires`（默认 1：一次性）、`cooldown`（默认 60 秒）、可选 `ttl`。
@@ -65,9 +90,13 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 - `GET /plugins/dsh-sentinel/state?sessionId=…` — dock 和侧边栏面板用的只读状态（省略 `sessionId` 返回所有会话）。
 - `GET /plugins/dsh-sentinel/dashboard` — server 全局 watch 表。
+- `GET /plugins/dsh-sentinel/dashboard.js` — 独立浏览器脚本。
+- `GET /plugins/dsh-sentinel/dashboard.css` — 独立样式表。
+- `GET /plugins/dsh-sentinel/icon.svg` — 用作页面 favicon 的现有包图标。
+- 这三个固定资源支持无响应体的 `HEAD`，其他方法返回 405，并分别使用正确 MIME 类型、`nosniff` 和需重新验证的缓存策略。
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook 入口；把一条 `curl` 塞进 CI 任务、git hook 或另一台机器的脚本，就能叫醒 agent。watch id 按会话隔离，`s` 限定符保证两个会话的 `watch-1` hook 不打架（工具直接发完整 URL）。不带 `s` 的 URL 仍可用，解析到第一条匹配的 webhook watch。
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — 手动取消。dashboard 表和每个 UI 行都带 ✕，任何 watch 都能手动停掉——包括会话和 agent 早就不在了的孤儿 watch；host 没有 session-deleted 事件，所以这是最后的兜底开关。
-- 四条路由都带浏览器信任围栏：浏览器标记的跨站请求（恶意页面可以往 localhost form-POST）和 DNS rebinding 尝试（Host/Origin 指向 DNS 主机名）一律 403。`curl`、CI 任务这类无头客户端不受影响。state 路由还返回每个会话的 `duty`（租约心跳年龄）和 `droppedWakeups`（被 `maxPendingWakeups` 上限丢掉的排队唤醒）。
+- 所有路由都带浏览器信任围栏：浏览器标记的跨站请求（恶意页面可以往 localhost form-POST）和 DNS rebinding 尝试（Host/Origin 指向 DNS 主机名）一律 403。`curl`、CI 任务这类无头客户端不受影响。state 路由还返回每个会话的 `duty`（租约心跳年龄）和 `droppedWakeups`（被 `maxPendingWakeups` 上限丢掉的排队唤醒）。
 
 首次探测语义：不带 pattern 的 watch 把第一次观测吸收为基线（不触发）；带 pattern 的 watch 如果目标已经匹配，第一次探测就触发——条件本来就成立。
 
@@ -135,8 +164,8 @@ dock、侧边栏条目和 dashboard 在原版 host 上都能用：条目注册�
 
 ```sh
 npm install
-npm run build     # tsc -b + tsdown (lib/index.js, lib/client.js)
-npm test          # vitest: domain fold/normalize、传感器、dashboard 转义、e2e 唤醒流程
+npm run build     # tsc -b + tsdown（服务端、宿主客户端和独立 dashboard 资源）
+npm test          # vitest：领域、传感器、React 生命周期、模板/浏览器、发布包资源、e2e
 ```
 
 ## 许可证

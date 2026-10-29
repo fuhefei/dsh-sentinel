@@ -30,3 +30,23 @@ either broken once or is one edit away from breaking.
    UI row) is the kill switch of last resort; never assume the agent is
    reachable. The state route exposes `pendingWakeups` per watch so queued
    wakeups are visible, not silent.
+8. **Localization is presentation, not sensor data.** Browser surfaces follow
+   the host locale; standalone dashboard links carry that locale explicitly.
+   Server messages use the configured `locale` (English by default). Persist
+   neutral trigger data alongside the readable summary so viewers can render
+   their own language. Never translate snapshot bytes, placeholder tokens,
+   notes, regexes, matches or protocol fields. Legacy summaries remain readable;
+   unknown or ambiguous text must pass through rather than being guessed or
+   rewritten. Follow the host's registered fallback chain for custom languages.
+   Dashboard markup belongs in a Mustache document layout, page content and
+   meaningful watch/fire partials; keep trivial tags in their owning template.
+   Use standard partial composition, not a custom inheritance engine. Keep the
+   default HTML escaping for text/quoted attributes and compose static partials
+   with plain presentation models, never raw-HTML slots, template functions or
+   caller-provided template source. Never re-evaluate inserted caller data. Browser
+   behavior is a separately built, self-contained TypeScript entry, not inline
+   JavaScript or serialized functions. Styles belong in a separately linked CSS
+   asset, never an inline style block. Fixed JS/CSS/icon routes retain the same
+   browser-trust fence, MIME/nosniff/cache rules and bodyless HEAD responses.
+   Test initial HTML, actual assets and packed-package routes independently of
+   the source checkout.

@@ -7,6 +7,8 @@
  * log, so subscriptions survive restarts and stay fully auditable.
  */
 
+import { formatFireSummary, translate, type FireTrigger, type Locale } from './locale.ts'
+
 export const SENTINEL_CHANGE_TYPE = 'sentinel/change'
 export const SENTINEL_CHANGE_VERSION = 1
 
@@ -128,13 +130,16 @@ export type SentinelChange =
 export interface FireFact {
   /** Ordinal of this fire for its subscription (1-based). */
   readonly fireNumber: number
-  /** Human-readable one-line transition summary. */
+  /** Human-readable fallback for older consumers; new events also carry neutral trigger data. */
   readonly summary: string
+  readonly trigger?: FireTrigger
+  /** Canonical probe state, localized only at the presentation boundary. */
+  readonly state?: string
   /** Snapshot excerpt before the transition (may be empty on baseline). */
   readonly before: string
   /** Snapshot excerpt after the transition. */
   readonly after: string
-  /** Probe duration in milliseconds. */
+  /** Probe duration in milliseconds; legacy wall-clock measurements can be negative after a clock correction. */
   readonly probeMs: number
 }
 
@@ -262,13 +267,48 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     if (typeof id !== 'string' || typeof at !== 'string' || !isRecord(fact)) {
       throw new SentinelLogError('fired change must carry id, at, and fact')
     }
+    const fireNumber = fact['fireNumber']
+    const summary = fact['summary']
+    const before = fact['before']
+    const after = fact['after']
+    const probeMs = fact['probeMs']
+    if (typeof fireNumber !== 'number' || !Number.isFinite(fireNumber) || !Number.isInteger(fireNumber) || fireNumber < 1) {
+      throw new SentinelLogError('fire number must be a positive finite integer')
+    }
+    if (typeof summary !== 'string' || typeof before !== 'string' || typeof after !== 'string') {
+      throw new SentinelLogError('fire fact must carry string summary, before, and after')
+    }
+    if (typeof probeMs !== 'number' || !Number.isFinite(probeMs)) {
+      throw new SentinelLogError('fire probeMs must be a finite number')
+    }
+    const rawTrigger = fact['trigger']
+    let trigger: FireTrigger | undefined
+    if (rawTrigger !== undefined) {
+      if (isRecord(rawTrigger) && (rawTrigger['kind'] === 'change' || rawTrigger['kind'] === 'webhook')) {
+        trigger = { ...rawTrigger, kind: rawTrigger['kind'] }
+      } else if (isRecord(rawTrigger) && rawTrigger['kind'] === 'pattern'
+        && typeof rawTrigger['pattern'] === 'string' && typeof rawTrigger['match'] === 'string') {
+        trigger = { ...rawTrigger, kind: 'pattern', pattern: rawTrigger['pattern'], match: rawTrigger['match'] }
+      } else {
+        throw new SentinelLogError('fire trigger must be change, webhook, or pattern with string pattern and match')
+      }
+    }
+    const state = fact['state']
+    if (state !== undefined && typeof state !== 'string') {
+      throw new SentinelLogError('fire state must be a string when present')
+    }
     const observed = value['observed']
     return {
       version: SENTINEL_CHANGE_VERSION,
       change: 'fired',
       id,
       at,
-      fact: fact as unknown as FireFact,
+      fact: {
+        ...fact,
+        fireNumber, summary, before, after, probeMs,
+        ...(trigger !== undefined ? { trigger } : {}),
+        ...(state !== undefined ? { state } : {}),
+      },
       ...(observed !== undefined ? { observed: decodeObserved(observed) } : {}),
     }
   }
@@ -441,21 +481,21 @@ export function clipExcerpt(text: string): string {
  * Render the wakeup message body: receipt, note, fact, history — everything
  * future-self needs without re-probing.
  */
-export function renderWakeup(sub: Subscription, fact: FireFact): string {
+export function renderWakeup(sub: Subscription, fact: FireFact, locale: Locale = 'en'): string {
   const lines = [
-    `[dsh-sentinel] 订阅 ${sub.id} 触发（第 ${String(fact.fireNumber)}/${String(sub.maxFires)} 次）`,
-    `监控对象: ${sub.spec.kind} · ${sub.spec.target}`,
-    sub.spec.pattern !== undefined ? `匹配模式: /${sub.spec.pattern}/` : undefined,
-    `变化: ${fact.summary}`,
-    fact.before !== '' ? `之前:\n${fact.before}` : undefined,
-    `现在:\n${fact.after}`,
+    translate(locale, 'wakeupTitle', { id: sub.id, count: fact.fireNumber, max: sub.maxFires }),
+    translate(locale, 'wakeupTarget', { kind: sub.spec.kind, target: sub.spec.target }),
+    sub.spec.pattern !== undefined ? translate(locale, 'wakeupPattern', { pattern: sub.spec.pattern }) : undefined,
+    translate(locale, 'wakeupChange', { summary: formatFireSummary(fact, locale) }),
+    fact.before !== '' ? translate(locale, 'wakeupBefore', { before: fact.before }) : undefined,
+    translate(locale, 'wakeupAfter', { after: fact.after }),
     '',
-    `你注册时留给自己的便签:\n${sub.note}`,
+    translate(locale, 'wakeupNote', { note: sub.note }),
     '',
-    '以上是哨兵条件唤醒：按便签处理完本次触发即停；除非用户或便签要求，不要重新注册监控、不要展开无关调查。',
+    translate(locale, 'wakeupInstruction'),
     fact.fireNumber >= sub.maxFires
-      ? '这是最后一次触发，该订阅已自动结束。'
-      : `剩余 ${String(sub.maxFires - fact.fireNumber)} 次触发额度；如果不再需要，用 sentinel_cancel 工具取消（id: "${sub.id}"）。`,
+      ? translate(locale, 'wakeupLast')
+      : translate(locale, 'wakeupRemaining', { remaining: sub.maxFires - fact.fireNumber, id: sub.id }),
   ]
   return lines.filter((line): line is string => line !== undefined).join('\n')
 }
