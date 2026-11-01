@@ -5,7 +5,7 @@
  * as a self-contained IIFE. HTML templates are imported as build-time text.
  */
 import { readFile } from 'node:fs/promises'
-import { basename, dirname, resolve as resolvePath } from 'node:path'
+import { basename, dirname, relative, resolve as resolvePath, sep } from 'node:path'
 import type { UserConfig } from 'tsdown'
 import { transform } from 'lightningcss'
 
@@ -25,18 +25,28 @@ const EXTERNALS: readonly string[] = [...PLATFORM_MODULES]
 const CSS_VIRTUAL_PREFIX = '\0dsh-css:'
 const CSS_VIRTUAL_SUFFIX = '.mjs'
 
-/** Import checked-in HTML templates as build-time text; no template loader is needed at runtime. */
+/**
+ * Import checked-in HTML templates as build-time text; no template loader is
+ * needed at runtime. Virtual ids stay package-relative so a committed bundle
+ * never embeds the build machine's checkout path (which would also make a
+ * later rebuild differ from the committed artifacts).
+ */
 function htmlTemplates() {
   const prefix = '\0sentinel-html:'
+  const root = process.cwd()
+  const files = new Map<string, string>()
   return {
     name: 'sentinel-html-templates',
     resolveId(source: string, importer: string | undefined) {
       if (!source.endsWith('.html?raw')) return null
-      return prefix + resolvePath(importer === undefined ? process.cwd() : dirname(importer), source.slice(0, -4))
+      const path = resolvePath(importer === undefined ? root : dirname(importer), source.slice(0, -4))
+      const id = prefix + relative(root, path).split(sep).join('/')
+      files.set(id, path)
+      return id
     },
     async load(this: { addWatchFile(path: string): void }, id: string) {
       if (!id.startsWith(prefix)) return null
-      const path = id.slice(prefix.length)
+      const path = files.get(id) ?? resolvePath(root, id.slice(prefix.length))
       this.addWatchFile(path)
       return `export default ${JSON.stringify(await readFile(path, 'utf8'))};`
     },
