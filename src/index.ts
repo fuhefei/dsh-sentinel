@@ -1189,7 +1189,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       ' script to wake you).',
       ' The "session" kind is event-driven: it fires when the session with id {target} finishes a turn — use it to chain',
       ' sessions serially, e.g. wake the next session when this one is done; no probing, the host turn/end',
-      ' event drives it). With "pattern", probe kinds fire on the no-match→match edge of that regex, webhooks',
+      ' event drives it. With "pattern", probe kinds fire on the no-match→match edge of that regex, webhooks',
       ' fire only when the payload matches, and session watches fire only when the ended turn\'s reason kind',
       ' matches (completed, aborted, blocked, error, max-tokens, interrupted, forked). Without it, probe kinds',
       ' fire on any snapshot change after the baseline, webhooks fire on any POST, and session watches fire on',
