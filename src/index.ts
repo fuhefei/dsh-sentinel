@@ -151,6 +151,9 @@ const FILE_WATCH_RETRY_MS = 60_000
 /** Compact the sidecar at boot when rows exceed active subscriptions by this margin. */
 const COMPACTION_MARGIN = 32
 
+/** Bound on session events buffered while the sidecar fold is still loading. */
+const MAX_PENDING_SESSION_EVENTS = 64
+
 /** Sidecar log location: `$DSH_HOME/sentinel.jsonl` (the settings-file convention). */
 export function storePath(): string {
   const home = process.env['DSH_HOME'] ?? join(homedir(), '.dsh')
@@ -311,6 +314,13 @@ class SentinelRuntime {
   private readonly dutyLeasePath = leasePath()
   private readonly pendingRounds = new Set<Promise<void>>()
   private ready = false
+  /**
+   * Session events that arrive while `start()` is still claiming duty and
+   * folding the sidecar would otherwise be evaluated against an empty watch
+   * set and lost. Buffer the narrow boot window, then replay once loaded.
+   */
+  private readonly pendingSessionEvents: Array<{ sessionId: string; event: unknown }> = []
+  private sessionEventsReady = false
   private activeDrive: Promise<void> | undefined
   private disposed = false
   /** This process owns probing/delivery. False while another instance's lease is fresh. */
@@ -328,6 +338,10 @@ class SentinelRuntime {
       this.ready = true
       await this.loadPersisted()
       if (this.disposed) return
+      this.sessionEventsReady = true
+      for (const entry of this.pendingSessionEvents.splice(0, this.pendingSessionEvents.length)) {
+        this.handleSessionEvent(entry.sessionId, entry.event)
+      }
       this.timer = setInterval(() => {
         if (this.pendingRounds.size === 0) this.trackRound(this.drive())
       }, this.config.heartbeatMs)
@@ -878,6 +892,13 @@ class SentinelRuntime {
    */
   handleSessionEvent(sessionId: string, event: unknown): void {
     if (this.disposed || !isRecord(event) || event['type'] !== 'turn/end') return
+    if (!this.sessionEventsReady) {
+      // Boot window: watches may still be loading. Keep the newest events
+      // bounded; `start()` replays them once the fold is in memory.
+      if (this.pendingSessionEvents.length >= MAX_PENDING_SESSION_EVENTS) this.pendingSessionEvents.shift()
+      this.pendingSessionEvents.push({ sessionId, event })
+      return
+    }
     const data = event['data']
     if (!isRecord(data)) return
     const reason = data['reason']
@@ -894,7 +915,9 @@ class SentinelRuntime {
         if (sub.spec.pattern !== undefined && !new RegExp(sub.spec.pattern, 'm').test(reasonKind)) continue
         if (sub.lastFiredAt !== undefined
           && Date.now() - Date.parse(sub.lastFiredAt) < sub.cooldownSeconds * 1000) continue
-        void this.fireSessionEvent(watch, sub, sessionId, turn, reasonKind, reasonJson)
+        // Track the durable commit so a one-shot headless process that exits
+        // right after its own turn/end cannot lose the fired row mid-write.
+        this.trackRound(this.fireSessionEvent(watch, sub, sessionId, turn, reasonKind, reasonJson))
       }
     }
   }
@@ -1162,9 +1185,9 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       ' "http" (URL status+body probed on an interval), "process" (pgrep pattern probed on an interval),',
       ' "port" (TCP connect to "[host:]port" probed on an interval; fires on open/closed changes —',
       ' good for "database is up", "dev server died"),',
-      ' "webhook" (pure push: returns a hook URL, any external system can POST to it to wake you —',
-      ' put a curl into a CI job, git hook, or another machine\'s script).',
-      ' "session" (event-driven: fires when the session with id {target} finishes a turn — use it to chain',
+      ' "webhook" (pure push: returns a hook URL; put a curl into a CI job, git hook or another machine\'s',
+      ' script to wake you).',
+      ' The "session" kind is event-driven: it fires when the session with id {target} finishes a turn — use it to chain',
       ' sessions serially, e.g. wake the next session when this one is done; no probing, the host turn/end',
       ' event drives it). With "pattern", probe kinds fire on the no-match→match edge of that regex, webhooks',
       ' fire only when the payload matches, and session watches fire only when the ended turn\'s reason kind',

@@ -654,6 +654,55 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(harness.followups[0]).toContain('任何回合结束都叫醒我')
   }, 15_000)
 
+  it('honors cooldown for session fires', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({
+      kind: 'session', target: 'session-other', note: 'cooldown smoke', max_fires: 3, cooldown_seconds: 3600,
+    }, {})
+
+    harness.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    await expect.poll(() => harness.followups.length).toBe(1)
+    harness.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    await sleep(300)
+    expect(harness.followups.length).toBe(1)
+    expect((await storeLines()).filter(row => row.change.change === 'fired')).toHaveLength(1)
+  }, 15_000)
+
+  it('buffers a matching turn/end that arrives while the sidecar fold is still loading', async () => {
+    await freshHome()
+    const first = makeHarness()
+    harnesses.push(first)
+    apply(first.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    first.emit('agent/created', { agent: first.agent })
+    await sleep(300)
+    const firstWatchTool = first.tools.find(tool => tool.name === 'sentinel_watch')
+    if (firstWatchTool === undefined) throw new Error('watch tool missing')
+    await firstWatchTool.execute({
+      kind: 'session', target: 'session-other', note: 'boot-window chain', max_fires: 1,
+    }, {})
+    // Stop this runtime; the sidecar keeps the watch for the next process.
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) await cleanup()
+
+    const second = makeHarness()
+    harnesses.push(second)
+    apply(second.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    second.emit('agent/created', { agent: second.agent })
+    // Arrives before claimDuty/loadPersisted completes: it must be buffered
+    // and replayed against the folded watch set instead of hitting an empty one.
+    second.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 7, reason: { kind: 'completed' } } })
+    await expect.poll(() => second.followups.length, { timeout: 5000 }).toBe(1)
+    expect(second.followups[0]).toContain('boot-window chain')
+    expect(second.followups[0]).toContain('Session session-other ended turn 7 (completed)')
+  }, 15_000)
+
   it('scopes webhook hook URLs per session: identical watch ids never cross-fire', async () => {
     await freshHome()
     const harness = makeHarness()
