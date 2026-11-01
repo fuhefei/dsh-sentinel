@@ -101,11 +101,11 @@ templates/layouts/document.html  文档元信息与资源链接
 - `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — 手动取消。dashboard 表和每个 UI 行都带 ✕，任何 watch 都能手动停掉——包括会话和 agent 早就不在了的孤儿 watch。活跃会话离开 store 时会发 `session/disposed`，但 sentinel 不把它当作取消信号（目标会话被 dispose 的 session watch 仍保持 armed，直到手动取消），所以手动取消仍然是最后的兜底开关。
 - 所有路由都带浏览器信任围栏：浏览器标记的跨站请求（恶意页面可以往 localhost form-POST）和 DNS rebinding 尝试（Host/Origin 指向 DNS 主机名）一律 403。`curl`、CI 任务这类无头客户端不受影响。state 路由还返回每个会话的 `duty`（租约心跳年龄）和 `droppedWakeups`（被 `maxPendingWakeups` 上限丢掉的排队唤醒）。
 
-首次探测语义：不带 pattern 的 watch 把第一次观测吸收为基线（不触发）；带 pattern 的 watch 如果目标已经匹配，第一次探测就触发——条件本来就成立。
+首次探测语义：不带 pattern 的探测类 watch 把第一次观测吸收为基线（不触发）；带 pattern 的探测类 watch 如果目标已经匹配，第一次探测就触发——条件本来就成立。session watch 没有探测基线：第一条匹配的 `turn/end` 就触发。
 
 ## 兼容性
 
-在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）：
+在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。
 
 - `0.2.1-rc.2` —— 2026-10-19，线上 web 部署由 `0.2.0-rc.2` 升级后实测（profile 净装、launcher 备份与回滚路径保留）：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 71 条、零跳过 bundle、终端插件仍在）。源码无需改动——对真实 `0.2.1-rc.2` 包运行 `tsc -b --noEmit` 通过、全部 76 个测试通过、重建的 `lib/` 逐字节不变——因此 0.13.2 是对齐版本：devDependencies 钉到 `0.2.1-rc.2`、声明 `engines.dsh` 为 `>=0.2.0-0 <0.3.0`，并补上 0.2 世代的展示元数据（`locale/*.json` + 图标），供插件管理器在不激活插件时读取。自 `0.2.1-alpha.4` 起，安装期版本闸门在声明了 `engines.dsh` 时**只**按它判断（已核对的宿主 `evaluatePluginCompatibility` 源码），因此 0.2 线的准入由这个字段承担；peer 范围仍作为老宿主的回退判断。
 - `0.2.1-alpha.1` —— 2026-10-07，对线上 profile 副本的彩排：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 68 条）。能到这一步需要放宽 peer 范围（见下方 `0.2.0-rc.2`）；并直接调用宿主的 `evaluatePluginCompatibility` 核对了版本闸门：当前范围放行 `0.2.0-rc.2` 与 `0.2.1-alpha.1`，仍拒绝 `0.2.0-rc.1` 及更旧。
