@@ -34,7 +34,7 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 带 `pattern` 时，探测类传感器在该正则的"不匹配→匹配"边沿触发，webhook 只接受匹配的载荷，session watch 只在回合结束原因匹配该正则时触发（原因取值：`completed`、`max-tokens`、`aborted`、`blocked`、`error`、`interrupted`、`forked`）；不带时，探测类传感器对基线之后的任何变化触发，webhook 对任何 POST 触发，session watch 对任何回合结束触发。
 
-session watch 让串行会话链无需在提示词里互相戳：`{ "kind": "session", "target": "<另一个会话 id>", "note": "第一步跑完了，轮到你了", "maxFires": 1 }` 会在目标会话结束回合时唤醒当前会话；加 `pattern: "^completed$"` 则只认干净完成（崩溃或中止的会话永远不会满足，链条自然停住）。事件源是宿主持久的 `turn/end`，没有探测基线，也不走心跳。
+session watch 让串行会话链无需在提示词里互相戳：`{ "kind": "session", "target": "<另一个会话 id>", "note": "第一步跑完了，轮到你了", "maxFires": 1 }` 会在目标会话结束回合时唤醒当前会话；加 `pattern: "^completed$"` 则只认干净完成（崩溃或中止的会话永远不会满足，链条自然停住）。事件源是宿主持久的 `turn/end`，没有探测基线，也不走心跳。若某个回合结束时没有任何常驻 dsh 进程在观察事件，该次结束不会被事后补发——需要扛住整段停机时间的链条应改用可探测的闸门。
 
 ## 配置
 

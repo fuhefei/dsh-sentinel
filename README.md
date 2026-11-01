@@ -34,7 +34,7 @@ Two surfaces make the server-global watch set visible. A **Sentinel entry in the
 
 With `pattern`, probe kinds fire on the no-match→match edge of that regex, webhooks accept only matching payloads, and session watches fire only when the ended turn's reason kind matches the regex (`completed`, `max-tokens`, `aborted`, `blocked`, `error`, `interrupted`, `forked`); without it, probe kinds fire on any change after the baseline, webhooks fire on any POST, and session watches fire on any turn end.
 
-Session watches make serial session chains possible without poking anything from a prompt: `{ "kind": "session", "target": "<other-session-id>", "note": "step 1 finished — you're up", "maxFires": 1 }` wakes the watching session when the target session finishes a turn, and `pattern: "^completed$"` requires a clean completion (a crashed or aborted session never satisfies it, so the chain stops). The event is the host's durable `turn/end`; no probe baseline or heartbeat is involved.
+Session watches make serial session chains possible without poking anything from a prompt: `{ "kind": "session", "target": "<other-session-id>", "note": "step 1 finished — you're up", "maxFires": 1 }` wakes the watching session when the target session finishes a turn, and `pattern: "^completed$"` requires a clean completion (a crashed or aborted session never satisfies it, so the chain stops). The event is the host's durable `turn/end`; no probe baseline or heartbeat is involved. A turn end that happens while no resident dsh process can observe events is not replayed later — use a probe-backed gate when a chain must survive total downtime.
 
 ## Configuration
 
