@@ -37,6 +37,7 @@ export function negotiateLocale(acceptLanguage: string | undefined, fallback: Lo
 export type FireTrigger =
   | { readonly kind: 'change' }
   | { readonly kind: 'pattern'; readonly pattern: string; readonly match: string }
+  | { readonly kind: 'session'; readonly sessionId: string; readonly turn: number; readonly reason: string }
   | { readonly kind: 'webhook' }
 
 export interface FireMessage {
@@ -49,6 +50,15 @@ const en = {
   snapshotChanged: 'Snapshot changed',
   patternMatched: 'Pattern /{pattern}/ started matching: {match}',
   webhookReceived: 'External push received (webhook)',
+  sessionTurnEnded: 'Session {session} ended turn {turn} ({reason})',
+  sessionTurnEndedNoTurn: 'Session {session} ended a turn ({reason})',
+  reasonCompleted: 'completed',
+  reasonMaxTokens: 'max-tokens',
+  reasonAborted: 'aborted',
+  reasonBlocked: 'blocked',
+  reasonError: 'error',
+  reasonInterrupted: 'interrupted',
+  reasonForked: 'forked',
   withState: '{summary} (state: {state})',
   stateAbsent: 'absent',
   stateExists: 'exists',
@@ -61,11 +71,14 @@ const en = {
   stateClosed: 'closed {address}',
   stateTimeout: 'timeout {address}',
   stateAwaitingPush: 'awaiting push',
+  stateAwaitingTurn: 'awaiting turn end',
+  stateTurnEnded: 'turn ended ({reason})',
   registered: 'Sentinel watch {id} registered: {kind} · {target}',
   hookAddress: 'Push URL: POST {url}',
   hookHost: ' (localhost refers to the dsh host; use its reachable address from another machine)',
   hookResident: ' — a resident dsh process must listen on this URL; a one-shot headless process cannot receive pushes after it exits',
   probeCadence: ' (probe every {interval}s{filePush}; server-side monitoring continues while the session sleeps; probing and wakeup delivery require a resident process such as dsh web after a one-shot headless process exits)',
+  sessionCadence: ' (fires when the target session ends a turn; the host turn-end event drives it, no probing; the optional pattern filters the turn-end reason kind)',
   filePush: ', file changes also trigger immediate probes',
   noWatches: 'No active sentinel watches.',
   notProbed: 'not probed',
@@ -88,6 +101,15 @@ const zh: Record<keyof typeof en, string> = {
   snapshotChanged: '快照发生变化',
   patternMatched: '模式 /{pattern}/ 开始匹配: {match}',
   webhookReceived: '外部推送到达（webhook）',
+  sessionTurnEnded: '会话 {session} 结束了第 {turn} 回合（{reason}）',
+  sessionTurnEndedNoTurn: '会话 {session} 结束了一个回合（{reason}）',
+  reasonCompleted: '完成',
+  reasonMaxTokens: '达到输出上限',
+  reasonAborted: '已中止',
+  reasonBlocked: '已阻塞',
+  reasonError: '出错',
+  reasonInterrupted: '已中断',
+  reasonForked: '已分叉',
   withState: '{summary}（状态: {state}）',
   stateAbsent: '不存在',
   stateExists: '存在',
@@ -100,11 +122,14 @@ const zh: Record<keyof typeof en, string> = {
   stateClosed: '端口不通 {address}',
   stateTimeout: '探测超时 {address}',
   stateAwaitingPush: '等待推送',
+  stateAwaitingTurn: '等待回合结束',
+  stateTurnEnded: '回合已结束（{reason}）',
   registered: '哨兵订阅 {id} 已注册: {kind} · {target}',
   hookAddress: '推送地址: POST {url}',
   hookHost: '（localhost 指 dsh 所在主机，跨机器调用请换成该主机的可达地址）',
   hookResident: '——需常驻 dsh 进程监听该地址，一次性 headless 进程退出后无法接收推送',
   probeCadence: '（每 {interval}s 探测{filePush}；会话休眠时由服务端值守；探测与触发投递由常驻 dsh 进程承担——一次性 headless 进程退出后，需有常驻进程（如 dsh web）运行才会生效）',
+  sessionCadence: '（该会话结束回合时触发；由宿主的回合结束事件驱动，不做探测；可选 pattern 过滤回合结束原因）',
   filePush: '，文件变化即时推送',
   noWatches: '没有活跃的哨兵订阅。',
   notProbed: '未探测',
@@ -126,12 +151,29 @@ const zh: Record<keyof typeof en, string> = {
 export const messages = { en, zh }
 export type MessageKey = keyof typeof en
 
+/** Canonical durable turn-end reason kinds → localized label keys. Unknown reasons pass through verbatim. */
+const REASON_KEYS = {
+  completed: 'reasonCompleted',
+  'max-tokens': 'reasonMaxTokens',
+  aborted: 'reasonAborted',
+  blocked: 'reasonBlocked',
+  error: 'reasonError',
+  interrupted: 'reasonInterrupted',
+  forked: 'reasonForked',
+} as const satisfies Record<string, MessageKey>
+
 /** Shared typed formatters, imported normally by the server, React client and standalone dashboard. */
 export function createPresentation(locale: Locale, dictionary: Readonly<Record<MessageKey, string>>) {
   /** Callback replacement preserves literal dollar signs and does not re-interpolate values. */
   function translate(key: MessageKey, values: Readonly<Record<string, string | number>> = {}): string {
     return dictionary[key].replace(/\{(\w+)\}/g, (token, name: string) =>
       values[name] === undefined ? token : String(values[name]))
+  }
+
+  /** Turn-end reason labels are a closed host vocabulary; unknown future kinds stay verbatim. */
+  function reasonLabel(reason: string): string {
+    const key = (REASON_KEYS as Readonly<Record<string, MessageKey | undefined>>)[reason]
+    return key === undefined ? reason : translate(key)
   }
 
   /** State is presentation-only: the canonical state and snapshot remain unchanged. */
@@ -153,6 +195,9 @@ export function createPresentation(locale: Locale, dictionary: Readonly<Record<M
       return translate(key, { address: port[2]! })
     }
     if (state === 'awaiting push') return translate('stateAwaitingPush')
+    if (state === 'awaiting turn end') return translate('stateAwaitingTurn')
+    const turnEnded = /^turn ended \(([\s\S]*)\)$/.exec(state)
+    if (turnEnded !== null) return translate('stateTurnEnded', { reason: reasonLabel(turnEnded[1]!) })
     return state
   }
 
@@ -187,7 +232,11 @@ export function createPresentation(locale: Locale, dictionary: Readonly<Record<M
     if (trigger === undefined) return fact.summary
     const summary = trigger.kind === 'change' ? translate('snapshotChanged')
       : trigger.kind === 'webhook' ? translate('webhookReceived')
-        : translate('patternMatched', { pattern: trigger.pattern, match: trigger.match })
+        : trigger.kind === 'session'
+          ? (trigger.turn > 0
+            ? translate('sessionTurnEnded', { session: trigger.sessionId, turn: trigger.turn, reason: reasonLabel(trigger.reason) })
+            : translate('sessionTurnEndedNoTurn', { session: trigger.sessionId, reason: reasonLabel(trigger.reason) }))
+          : translate('patternMatched', { pattern: trigger.pattern, match: trigger.match })
     return message.state === undefined ? summary
       : translate('withState', { summary, state: localizeState(message.state) })
   }

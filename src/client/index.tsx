@@ -90,6 +90,7 @@ const zh = {
   'tabempty': '当前没有活跃的监控。',
   'cancel': '取消这个监控',
   'pending': '{n} 个唤醒待投递',
+  'turnEnd': '回合结束时',
 } satisfies Record<string, string>
 type SentinelKey = keyof typeof zh
 const en = {
@@ -114,6 +115,7 @@ const en = {
   'tabempty': 'No active watches right now.',
   'cancel': 'Cancel this watch',
   'pending': '{n} wakeup(s) pending',
+  'turnEnd': 'on turn end',
 } satisfies Record<string, string>
 
 const SIDE_CLEARANCE = 'var(--dsh-composer-side-clearance, 16px)'
@@ -231,6 +233,7 @@ const ICON_PATHS = {
   http: ['M8 3 4 7l4 4', 'M4 7h16', 'M16 21l4-4-4-4', 'M20 17H4'],
   process: ['M6 4l14 8-14 8Z'],
   port: ['M9 2v6', 'M15 2v6', 'M6 8h12v4a6 6 0 0 1-12 0Z', 'M12 18v4'],
+  session: ['M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2', 'M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z', 'M23 21v-2a4 4 0 0 0-3-3.87', 'M16 3.13a4 4 0 0 1 0 7.75'],
   webhook: ['M13 2 3 14h7l-1 8 10-12h-7Z'],
   chevron: ['M6 9l6 6 6-6'],
 } as const
@@ -261,6 +264,7 @@ const KIND_ICONS: Record<string, keyof typeof ICON_PATHS> = {
   http: 'http',
   process: 'process',
   port: 'port',
+  session: 'session',
   webhook: 'webhook',
 }
 
@@ -298,7 +302,9 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
   const { watch, t, locale } = props
   const cadence = watch.kind === 'webhook'
     ? t('push')
-    : `${t('next', { s: countdown(watch.nextDueAt) })}${watch.kind === 'file' ? ` · ${t('push')}` : ''}`
+    : watch.kind === 'session'
+      ? t('turnEnd')
+      : `${t('next', { s: countdown(watch.nextDueAt) })}${watch.kind === 'file' ? ` · ${t('push')}` : ''}`
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '2px 12px', minHeight: 24 }}>
       <span style={{ flex: 'none', display: 'inline-flex', width: 16, justifyContent: 'center', color: 'var(--dsw-alias-label-tertiary)' }}>

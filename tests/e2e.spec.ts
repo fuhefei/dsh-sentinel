@@ -25,8 +25,8 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
   const resumedOptions: Array<Record<string, unknown> | undefined> = []
   const mountedPresets: Array<string | undefined> = []
 
-  function emit(event: string, arg: unknown): void {
-    for (const callback of listeners.get(event) ?? []) callback(arg)
+  function emit(event: string, ...args: unknown[]): void {
+    for (const callback of listeners.get(event) ?? []) callback(...args)
   }
 
   function makeCtx() {
@@ -569,6 +569,91 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(harness.followups[0]).toContain('status=success build=42')
   }, 10_000)
 
+  it('fires a session watch on the target session\'s turn/end, honoring the reason pattern', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    const created = await watchTool.execute({
+      kind: 'session',
+      target: 'session-other',
+      pattern: '^completed$',
+      note: '上一棒已完成，轮到你处理',
+      max_fires: 1,
+      cooldown_seconds: 0,
+    }, {}) as { id: string; kind: string; target: string; intervalSeconds: number }
+    expect(created).toMatchObject({ kind: 'session', target: 'session-other' })
+    const receipt = watchTool.output.render({}, created).map(block => block.text ?? '').join('')
+    expect(receipt).toContain('session-other')
+    expect(receipt).toContain('no probing')
+
+    const stateRoute = harness.routes.find(route => route.path === STATE_PATH)
+    if (stateRoute === undefined) throw new Error('state route missing')
+    const readState = async () => {
+      let body = ''
+      await stateRoute.handler({ url: STATE_PATH }, { writeHead() {}, end(value: string) { body = value } })
+      return JSON.parse(body) as {
+        watches: Array<{ kind: string; target: string; lastState?: string; lastProbeAt?: number; nextDueAt?: number }>
+        recentFires: Array<{ trigger: unknown; after: string }>
+      }
+    }
+    const initial = await readState()
+    expect(initial.watches).toHaveLength(1)
+    expect(initial.watches[0]).toMatchObject({ kind: 'session', target: 'session-other', lastState: 'awaiting turn end' })
+    // Push-only: no heartbeat probe ever touches a session watch.
+    expect(initial.watches[0]?.lastProbeAt).toBeUndefined()
+
+    // Non-matching reasons, other event types and other target sessions stay silent.
+    harness.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'aborted', reason: { kind: 'user' } } } })
+    harness.emit('session/event', { id: 'session-other' }, { type: 'step/end', data: { turn: 1, step: 1 } })
+    harness.emit('session/event', { id: 'session-elsewhere' }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } })
+    harness.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 2 } })
+    await sleep(200)
+    expect(harness.followups.length).toBe(0)
+
+    harness.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } })
+    await expect.poll(() => harness.followups.length).toBe(1)
+    const body = harness.followups[0]!
+    expect(body).toContain('上一棒已完成，轮到你处理')
+    expect(body).toContain('session-other')
+    expect(body).toContain('Session session-other ended turn 2 (completed)')
+    expect(body).toContain('This was the final fire')
+
+    const final = await readState()
+    expect(final.watches).toHaveLength(0)
+    expect(final.recentFires[0]?.trigger).toEqual({ kind: 'session', sessionId: 'session-other', turn: 2, reason: 'completed' })
+    expect(final.recentFires[0]?.after).toBe('{"kind":"completed"}')
+  }, 15_000)
+
+  it('fires a session watch on any turn end when no pattern is given', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    await watchTool.execute({
+      kind: 'session',
+      target: 'session-other',
+      note: '任何回合结束都叫醒我',
+      max_fires: 2,
+      cooldown_seconds: 0,
+    }, {})
+
+    harness.emit('session/event', { id: 'session-other' }, { type: 'turn/end', data: { turn: 4, reason: { kind: 'aborted', reason: { kind: 'timeout' } } } })
+    await expect.poll(() => harness.followups.length).toBe(1)
+    expect(harness.followups[0]).toContain('Session session-other ended turn 4 (aborted)')
+    expect(harness.followups[0]).toContain('任何回合结束都叫醒我')
+  }, 15_000)
+
   it('scopes webhook hook URLs per session: identical watch ids never cross-fire', async () => {
     await freshHome()
     const harness = makeHarness()
@@ -904,7 +989,12 @@ describe('sentinel end-to-end (in-process)', () => {
 
   it('runs one duty owner per DSH_HOME: passive instance defers, then takes over', async () => {
     await freshHome()
-    const cfg = { ...DEFAULT_CONFIG, heartbeatMs: 500, dutyLeaseTtlMs: 400 }
+    // The owner renews its lease at each heartbeat, so the lease TTL must be
+    // comfortably larger than the heartbeat: with TTL < heartbeat every cycle
+    // leaves a stale window where a passive instance can legitimately take
+    // over, making this assertion racy under load (observed on the 0.13.2
+    // baseline too).
+    const cfg = { ...DEFAULT_CONFIG, heartbeatMs: 200, dutyLeaseTtlMs: 2500 }
 
     // Owner claims the duty lease first.
     const owner = makeHarness()

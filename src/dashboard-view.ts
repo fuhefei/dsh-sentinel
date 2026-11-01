@@ -9,7 +9,7 @@ const en = {
   heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe', ''],
   fireHeads: ['Time', 'Watch', 'Session', 'Summary'],
   empty: 'No active watches right now.', firesTitle: 'Recent fires', firesEmpty: 'No fires yet.',
-  live: 'live', dormant: 'dormant', probing: 'probing', push: 'live push',
+  live: 'live', dormant: 'dormant', probing: 'probing', push: 'live push', turnEnd: 'on turn end',
   cancel: 'Cancel this watch', pending: '{n} pending', dropped: '{n} dropped',
   count: '{n} watch(es)', duty: 'duty heartbeat {age}s ago',
   dutyStale: 'duty heartbeat stale ({age}s ago)', dutyNone: 'no resident duty process',
@@ -19,7 +19,7 @@ const zh: typeof en = {
   heads: ['会话', '监控', '传感器', '目标', '模式', '触发', '最近状态', '下次探测', ''],
   fireHeads: ['时间', '监控', '会话', '摘要'],
   empty: '当前没有活跃的监控。', firesTitle: '最近触发', firesEmpty: '尚未触发过。',
-  live: '活跃', dormant: '休眠', probing: '探测中', push: '即时推送',
+  live: '活跃', dormant: '休眠', probing: '探测中', push: '即时推送', turnEnd: '回合结束时',
   cancel: '取消这个监控', pending: '待投递 {n}', dropped: '已丢弃 {n} 唤醒',
   count: '{n} 个监控', duty: '值守心跳 {age}s 前',
   dutyStale: '值守心跳 {age}s 前（疑似停摆）', dutyNone: '无常驻值守进程',
@@ -56,7 +56,8 @@ export function createDashboardRenderer(locale: Locale) {
       fireCount: row.fireCount, maxFires: row.maxFires,
       state: row.lastState === undefined ? copy.probing : presentation.localizeState(row.lastState),
       next: row.kind === 'webhook' ? copy.push
-        : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…',
+        : row.kind === 'session' ? copy.turnEnd
+          : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…',
       cancel: copy.cancel,
       dropped: badge('dropped', dropped[row.sessionId] ?? 0),
       pending: badge('pending', row.pendingWakeups),

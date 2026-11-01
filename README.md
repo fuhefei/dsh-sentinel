@@ -8,7 +8,7 @@ Condition-driven wakeup for [DeepSeek Harness](https://github.com/deepseek-ai/de
 
 ## How it works
 
-The node half owns one server-lifetime runtime that folds a plugin-owned sidecar log (`$DSH_HOME/sentinel.jsonl`) into live subscriptions, probes every sensor on a shared 5s heartbeat, and delivers wakeups through the official followup channel — resuming a dormant session's agent first when needed. Subscriptions therefore survive process restarts, and conditions that become true while the server is down late-fire on the next probe.
+The node half owns one server-lifetime runtime that folds a plugin-owned sidecar log (`$DSH_HOME/sentinel.jsonl`) into live subscriptions, probes every probe sensor on a shared 5s heartbeat, observes every published session's durable `turn/end` event for `session` watches, and delivers wakeups through the official followup channel — resuming a dormant session's agent first when needed. Subscriptions therefore survive process restarts, and conditions that become true while the server is down late-fire on the next probe (session watches fire on the next observed turn end).
 
 Watching is a resident-process concern: probing and fire delivery only run while a long-running dsh process (typically `dsh web`) is up. Headless one-shot runs load the plugin and can create, list and cancel watches, but nothing probes after the process exits — those watches become active once a resident process starts.
 
@@ -30,8 +30,11 @@ Two surfaces make the server-global watch set visible. A **Sentinel entry in the
 | `process` | `pgrep -f` pattern, probed on an interval | match-set change |
 | `port` | TCP connect to `[host:]port`, probed on an interval | reachability change (open/closed/timeout) |
 | `webhook` | pure push | any POST to the returned hook URL |
+| `session` | host session-event feed (no probing) | another session's `turn/end`; optional `pattern` filters the reason kind |
 
-With `pattern`, probe kinds fire on the no-match→match edge of that regex and webhooks accept only matching payloads; without it, probe kinds fire on any change after the baseline.
+With `pattern`, probe kinds fire on the no-match→match edge of that regex, webhooks accept only matching payloads, and session watches fire only when the ended turn's reason kind matches the regex (`completed`, `max-tokens`, `aborted`, `blocked`, `error`, `interrupted`, `forked`); without it, probe kinds fire on any change after the baseline, webhooks fire on any POST, and session watches fire on any turn end.
+
+Session watches make serial session chains possible without poking anything from a prompt: `{ "kind": "session", "target": "<other-session-id>", "note": "step 1 finished — you're up", "maxFires": 1 }` wakes the watching session when the target session finishes a turn, and `pattern: "^completed$"` requires a clean completion (a crashed or aborted session never satisfies it, so the chain stops). The event is the host's durable `turn/end`; no probe baseline or heartbeat is involved.
 
 ## Configuration
 
@@ -82,7 +85,7 @@ Styles live in [the standalone stylesheet source](src/dashboard.css), copied by 
 
 ## Tools
 
-- `sentinel_watch` — register a watch: `kind`, `target`, optional `pattern`, `interval` (1–3600s, default 30), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `ttl`.
+- `sentinel_watch` — register a watch: `kind` (`file`, `command`, `http`, `process`, `port`, `session` or `webhook`), `target`, optional `pattern`, `interval` (5–86400s, default 30; ignored for `session` and `webhook`), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `ttl`. For `session`, `target` is the id of the session whose `turn/end` to observe.
 - `sentinel_list` — active watches with live probe state.
 - `sentinel_cancel` — cancel one watch by id.
 
@@ -95,7 +98,7 @@ Styles live in [the standalone stylesheet source](src/dashboard.css), copied by 
 - `GET /plugins/dsh-sentinel/icon.svg` — the existing package icon used as the page favicon.
 - These three fixed assets support `HEAD` with no body, reject other methods with 405, and use their own MIME types, `nosniff` and revalidation rather than immutable caching.
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook entry; put a `curl` into a CI job, git hook, or another machine's script to wake the agent. Watch ids are per session, so the `s` qualifier is what keeps two sessions' `watch-1` hooks from colliding (the tool hands out the full URL). URLs without `s` still work and resolve to the first matching webhook watch.
-- `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone; the host has no session-deleted event, so this is the kill switch of last resort.
+- `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — manual cancel. The dashboard table and every UI row carry a ✕ that calls this, so a watch can always be stopped by hand — including orphaned ones whose session (and agent) is long gone. A live session leaving the store emits `session/disposed`, but sentinel does not treat that as a cancel (a `session` watch whose target was disposed stays armed until cancelled), so manual cancel is the kill switch of last resort.
 - All routes enforce a browser-trust fence: browser-marked cross-site requests (a malicious page can form-POST to localhost) and DNS-rebinding attempts (Host/Origin naming a DNS host) get 403. Headerless clients such as `curl` and CI jobs are unaffected. The state route also reports `duty` (lease heartbeat age) and `droppedWakeups` per session (queued wakeups dropped by the `maxPendingWakeups` cap).
 
 First-probe semantics: a pattern-less watch absorbs its first observation as the baseline (no fire), while a pattern watch whose target already matches fires on the first probe — the condition already holds.

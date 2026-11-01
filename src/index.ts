@@ -628,6 +628,10 @@ class SentinelRuntime {
         const state = watch.probes.get(sub.id)
         if (state !== undefined && state.lastState === undefined) state.lastState = 'awaiting push'
       }
+      if (sub.spec.kind === 'session') {
+        const state = watch.probes.get(sub.id)
+        if (state !== undefined && state.lastState === undefined) state.lastState = 'awaiting turn end'
+      }
     }
   }
 
@@ -750,7 +754,7 @@ class SentinelRuntime {
           })
           continue
         }
-        if (sub.spec.kind === 'webhook') continue
+        if (sub.spec.kind === 'webhook' || sub.spec.kind === 'session') continue
         const state = watch.probes.get(sub.id)
         if (state === undefined || state.probing || state.nextDueAt > now) continue
         if (sub.lastFiredAt !== undefined
@@ -863,6 +867,66 @@ class SentinelRuntime {
     }
     void this.deliver(watch)
     return { status: 200, body: { fired: true, id } }
+  }
+
+  /**
+   * Host session-event feed: fire `session` watches when the target session
+   * commits a `turn/end`. This is push-only like webhooks — no probe baseline:
+   * the event supplies the turn and its machine-readable reason, the optional
+   * pattern filters on `reason.kind`, and cooldown/budget/durability run
+   * through the same durable fire path as every other kind.
+   */
+  handleSessionEvent(sessionId: string, event: unknown): void {
+    if (this.disposed || !isRecord(event) || event['type'] !== 'turn/end') return
+    const data = event['data']
+    if (!isRecord(data)) return
+    const reason = data['reason']
+    if (!isRecord(reason) || typeof reason['kind'] !== 'string' || reason['kind'] === '') {
+      this.warn(`ignoring malformed turn/end event for session "${sessionId}"`)
+      return
+    }
+    const reasonKind = reason['kind']
+    const turn = typeof data['turn'] === 'number' && Number.isInteger(data['turn']) && data['turn'] >= 0 ? data['turn'] : 0
+    const reasonJson = JSON.stringify(reason)
+    for (const watch of [...this.watches.values()]) {
+      for (const sub of [...watch.folded.active.values()]) {
+        if (sub.spec.kind !== 'session' || sub.spec.target !== sessionId) continue
+        if (sub.spec.pattern !== undefined && !new RegExp(sub.spec.pattern, 'm').test(reasonKind)) continue
+        if (sub.lastFiredAt !== undefined
+          && Date.now() - Date.parse(sub.lastFiredAt) < sub.cooldownSeconds * 1000) continue
+        void this.fireSessionEvent(watch, sub, sessionId, turn, reasonKind, reasonJson)
+      }
+    }
+  }
+
+  /** One event-driven session fire; a failed commit keeps the watch armed for the next turn/end. */
+  private async fireSessionEvent(
+    watch: SessionWatch,
+    sub: Subscription,
+    targetSessionId: string,
+    turn: number,
+    reasonKind: string,
+    reasonJson: string,
+  ): Promise<void> {
+    const state = watch.probes.get(sub.id)
+    if (state !== undefined) state.lastState = `turn ended (${reasonKind})`
+    try {
+      await this.fireSubscription(watch, sub, {
+        fireNumber: sub.fireCount + 1,
+        summary: formatFireSummary({
+          summary: '',
+          trigger: { kind: 'session', sessionId: targetSessionId, turn, reason: reasonKind },
+        }, this.config.locale ?? 'en'),
+        trigger: { kind: 'session', sessionId: targetSessionId, turn, reason: reasonKind },
+        before: '',
+        after: clipExcerpt(reasonJson),
+        probeMs: 0,
+      })
+    } catch (error: unknown) {
+      this.warn(`session fire failed for ${sub.id} (watch stays armed; next turn/end retries): ${describe(error)}`)
+      return
+    }
+    this.flushWakeups(watch)
   }
 
   /** The single durable fire path: log the change, remember it, queue the wakeup. */
@@ -1020,6 +1084,10 @@ function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -1095,29 +1163,34 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       ' "port" (TCP connect to "[host:]port" probed on an interval; fires on open/closed changes —',
       ' good for "database is up", "dev server died"),',
       ' "webhook" (pure push: returns a hook URL, any external system can POST to it to wake you —',
-      ' put a curl into a CI job, git hook, or another machine\'s script). With "pattern", probe kinds fire',
-      ' on the no-match→match edge of that regex and webhooks fire only when the payload matches;',
-      ' without it, probe kinds fire on any snapshot change after the baseline and webhooks fire on any POST.',
+      ' put a curl into a CI job, git hook, or another machine\'s script).',
+      ' "session" (event-driven: fires when the session with id {target} finishes a turn — use it to chain',
+      ' sessions serially, e.g. wake the next session when this one is done; no probing, the host turn/end',
+      ' event drives it). With "pattern", probe kinds fire on the no-match→match edge of that regex, webhooks',
+      ' fire only when the payload matches, and session watches fire only when the ended turn\'s reason kind',
+      ' matches (completed, aborted, blocked, error, max-tokens, interrupted, forked). Without it, probe kinds',
+      ' fire on any snapshot change after the baseline, webhooks fire on any POST, and session watches fire on',
+      ' any turn end.',
     ].join(''),
     parameters: {
       kind: {
         type: 'string',
         required: true,
-        enum: ['file', 'command', 'http', 'process', 'port', 'webhook'],
-        description: 'Sensor engine: probing (file/command/http/process/port) or pure push (webhook).',
+        enum: ['file', 'command', 'http', 'process', 'port', 'session', 'webhook'],
+        description: 'Sensor engine: probing (file/command/http/process/port), session turn-end events (session), or pure push (webhook).',
       },
       target: {
         type: 'string',
         required: true,
-        description: 'file: absolute path; command: read-only shell line; http: URL; process: pgrep -f pattern; port: "[host:]port"; webhook: short label naming the expected caller.',
+        description: 'file: absolute path; command: read-only shell line; http: URL; process: pgrep -f pattern; port: "[host:]port"; session: id of the target session whose turn-end to observe; webhook: short label naming the expected caller.',
       },
       pattern: {
         type: 'string',
-        description: 'Optional regex in JavaScript RegExp syntax (compiled with the m flag; RE2 inline flags like (?s) are invalid — write [\\s\\S]+ instead). Probe kinds fire on its no-match→match transition over real probe content; placeholder states (missing file, unreachable URL, no matching process) never match. Webhooks only accept payloads it matches.',
+        description: 'Optional regex in JavaScript RegExp syntax (compiled with the m flag; RE2 inline flags like (?s) are invalid — write [\\s\\S]+ instead). Probe kinds fire on its no-match→match transition over real probe content; placeholder states (missing file, unreachable URL, no matching process) never match. Webhooks only accept payloads it matches. Session watches fire only when the turn-end reason kind matches.',
       },
       interval_seconds: {
         type: 'number',
-        description: `Probe interval in seconds (${String(MIN_INTERVAL_SECONDS)}–${String(MAX_INTERVAL_SECONDS)}, default 30; ignored for webhook and accelerated by push for file).`,
+        description: `Probe interval in seconds (${String(MIN_INTERVAL_SECONDS)}–${String(MAX_INTERVAL_SECONDS)}, default 30; ignored for session and webhook and accelerated by push for file).`,
       },
       note: {
         type: 'string',
@@ -1143,10 +1216,12 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
         textBlock(translate(locale, 'registered', { id: value.id, kind: value.kind, target: value.target }) + (value.hookPath !== undefined
           ? '\n' + translate(locale, 'hookAddress', { url: value.hookPath })
             + (value.hookPath.startsWith('http') ? translate(locale, 'hookHost') : '') + translate(locale, 'hookResident')
-          : translate(locale, 'probeCadence', {
-            interval: value.intervalSeconds,
-            filePush: value.kind === 'file' ? translate(locale, 'filePush') : '',
-          }))),
+          : value.kind === 'session'
+            ? translate(locale, 'sessionCadence')
+            : translate(locale, 'probeCadence', {
+              interval: value.intervalSeconds,
+              filePush: value.kind === 'file' ? translate(locale, 'filePush') : '',
+            }))),
     },
     async execute(args: {
       kind: string
@@ -1510,12 +1585,21 @@ export function apply(ctx: ContextLike, config: Config = DEFAULT_CONFIG): void {
       }, `${PLUGIN_ID}.channel()`)
     })
 
+    // Root-scope `session/event` feed: the host dispatches every published
+    // session's durable events here; session watches only need `turn/end`.
+    const stopSessionEvents = ctx.on('session/event', (...args: never[]) => {
+      const session = args[0] as unknown as { id?: unknown } | undefined
+      if (stopping || typeof session?.id !== 'string') return
+      runtime.handleSessionEvent(session.id, args[1])
+    })
+
     runtime.start()
 
     return async () => {
       stopping = true
       if (typeof stopRoutes === 'function') stopRoutes()
       stopCreated()
+      stopSessionEvents()
       await runtime.dispose()
     }
   }, `${PLUGIN_ID}.lifecycle()`)

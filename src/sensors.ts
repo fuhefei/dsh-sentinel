@@ -26,7 +26,8 @@ const SNAPSHOT_TAIL_BYTES = 8192
 /**
  * Placeholder snapshots mean "the target itself is missing/unreachable", not
  * content. Patterns must never match them: an any-content regex like [\s\S]+
- * would otherwise fire on the very first probe of an absent file.
+ * would otherwise fire on the very first probe of an absent file. Push-only
+ * kinds (`webhook`, `session`) never probe and use the push-only placeholder.
  */
 const PLACEHOLDER_ABSENT = '<absent>'
 const PLACEHOLDER_UNREACHABLE = '<unreachable>'
@@ -159,6 +160,8 @@ export function probe(spec: SensorSpec): Promise<ProbeResult> {
     case 'process': return probeProcess(spec.target)
     case 'port': return probePort(spec.target)
     case 'webhook': return Promise.resolve({ snapshot: PLACEHOLDER_PUSH_ONLY, state: 'awaiting push' })
+    // Session watches are driven by the host's turn/end event, never by the heartbeat.
+    case 'session': return Promise.resolve({ snapshot: PLACEHOLDER_PUSH_ONLY, state: 'awaiting turn end' })
   }
 }
 

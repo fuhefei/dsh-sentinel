@@ -8,7 +8,7 @@
 
 ## 工作原理
 
-Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 sidecar 日志（`$DSH_HOME/sentinel.jsonl`）折叠成活跃订阅，按共享的 5 秒心跳逐个探测传感器，命中后走官方 followup 通道投递唤醒——必要时先复活休眠会话的 agent。所以订阅能扛住进程重启；server 停机期间变真的条件，会在下一次探测时补触发。
+Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 sidecar 日志（`$DSH_HOME/sentinel.jsonl`）折叠成活跃订阅，按共享的 5 秒心跳探测探测类传感器，同时监听宿主所有已发布会话的持久 `turn/end` 事件供 `session` 传感器使用，命中后走官方 followup 通道投递唤醒——必要时先复活休眠会话的 agent。所以订阅能扛住进程重启；server 停机期间变真的条件，会在下一次探测时补触发（session 类 watch 在下次观察到回合结束时触发）。
 
 值守是常驻进程的事：探测和触发投递只在有一个长期运行的 dsh 进程（通常是 `dsh web`）时进行。一次性 headless 运行也能加载插件、创建/列出/取消 watch，但进程退出后没人探测——等下一个常驻进程起来，这些 watch 自动恢复值守。
 
@@ -30,8 +30,11 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 | `process` | `pgrep -f` 模式，按间隔探测 | 匹配集变化 |
 | `port` | 对 `[host:]port` 做 TCP 连接，按间隔探测 | 可达性变化（open/closed/timeout） |
 | `webhook` | 纯推送 | 对返回的 hook URL 发任何 POST |
+| `session` | 宿主会话事件流（不探测） | 另一个会话的 `turn/end`；可选 `pattern` 过滤回合结束原因 |
 
-带 `pattern` 时，探测类传感器在该正则的"不匹配→匹配"边沿触发，webhook 只接受匹配的载荷；不带时，探测类传感器对基线之后的任何变化触发。
+带 `pattern` 时，探测类传感器在该正则的"不匹配→匹配"边沿触发，webhook 只接受匹配的载荷，session watch 只在回合结束原因匹配该正则时触发（原因取值：`completed`、`max-tokens`、`aborted`、`blocked`、`error`、`interrupted`、`forked`）；不带时，探测类传感器对基线之后的任何变化触发，webhook 对任何 POST 触发，session watch 对任何回合结束触发。
+
+session watch 让串行会话链无需在提示词里互相戳：`{ "kind": "session", "target": "<另一个会话 id>", "note": "第一步跑完了，轮到你了", "maxFires": 1 }` 会在目标会话结束回合时唤醒当前会话；加 `pattern: "^completed$"` 则只认干净完成（崩溃或中止的会话永远不会满足，链条自然停住）。事件源是宿主持久的 `turn/end`，没有探测基线，也不走心跳。
 
 ## 配置
 
@@ -82,7 +85,7 @@ templates/layouts/document.html  文档元信息与资源链接
 
 ## 工具
 
-- `sentinel_watch` — 注册 watch：`kind`、`target`、可选 `pattern`、`interval`（1–3600 秒，默认 30）、`note`（随每次唤醒原样送达）、`maxFires`（默认 1：一次性）、`cooldown`（默认 60 秒）、可选 `ttl`。
+- `sentinel_watch` — 注册 watch：`kind`（`file`、`command`、`http`、`process`、`port`、`session` 或 `webhook`）、`target`、可选 `pattern`、`interval`（5–86400 秒，默认 30；`session` 与 `webhook` 忽略）、`note`（随每次唤醒原样送达）、`maxFires`（默认 1：一次性）、`cooldown`（默认 60 秒）、可选 `ttl`。`session` 的 `target` 是要观察 `turn/end` 的会话 id。
 - `sentinel_list` — 列出活跃 watch 及其实时探测状态。
 - `sentinel_cancel` — 按 id 取消一条 watch。
 
@@ -95,7 +98,7 @@ templates/layouts/document.html  文档元信息与资源链接
 - `GET /plugins/dsh-sentinel/icon.svg` — 用作页面 favicon 的现有包图标。
 - 这三个固定资源支持无响应体的 `HEAD`，其他方法返回 405，并分别使用正确 MIME 类型、`nosniff` 和需重新验证的缓存策略。
 - `POST /plugins/dsh-sentinel/hook?id=watch-N&s=<sessionId>` — webhook 入口；把一条 `curl` 塞进 CI 任务、git hook 或另一台机器的脚本，就能叫醒 agent。watch id 按会话隔离，`s` 限定符保证两个会话的 `watch-1` hook 不打架（工具直接发完整 URL）。不带 `s` 的 URL 仍可用，解析到第一条匹配的 webhook watch。
-- `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — 手动取消。dashboard 表和每个 UI 行都带 ✕，任何 watch 都能手动停掉——包括会话和 agent 早就不在了的孤儿 watch；host 没有 session-deleted 事件，所以这是最后的兜底开关。
+- `POST /plugins/dsh-sentinel/cancel?sessionId=…&id=watch-N` — 手动取消。dashboard 表和每个 UI 行都带 ✕，任何 watch 都能手动停掉——包括会话和 agent 早就不在了的孤儿 watch。活跃会话离开 store 时会发 `session/disposed`，但 sentinel 不把它当作取消信号（目标会话被 dispose 的 session watch 仍保持 armed，直到手动取消），所以手动取消仍然是最后的兜底开关。
 - 所有路由都带浏览器信任围栏：浏览器标记的跨站请求（恶意页面可以往 localhost form-POST）和 DNS rebinding 尝试（Host/Origin 指向 DNS 主机名）一律 403。`curl`、CI 任务这类无头客户端不受影响。state 路由还返回每个会话的 `duty`（租约心跳年龄）和 `droppedWakeups`（被 `maxPendingWakeups` 上限丢掉的排队唤醒）。
 
 首次探测语义：不带 pattern 的 watch 把第一次观测吸收为基线（不触发）；带 pattern 的 watch 如果目标已经匹配，第一次探测就触发——条件本来就成立。

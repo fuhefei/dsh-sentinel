@@ -6,6 +6,9 @@ const cases: ReadonlyArray<{ fact: FireMessage; en: string; zh: string }> = [
   { fact: { summary: '', trigger: { kind: 'change' }, state: 'exit 0' }, en: 'Snapshot changed (state: exit 0)', zh: '快照发生变化（状态: 退出码 0）' },
   { fact: { summary: '', trigger: { kind: 'pattern', pattern: '准备/好', match: '准备好 $& {id}\nnext' } }, en: 'Pattern /准备/好/ started matching: 准备好 $& {id}\nnext', zh: '模式 /准备/好/ 开始匹配: 准备好 $& {id}\nnext' },
   { fact: { summary: '', trigger: { kind: 'webhook' } }, en: 'External push received (webhook)', zh: '外部推送到达（webhook）' },
+  { fact: { summary: '', trigger: { kind: 'session', sessionId: 'session-b', turn: 3, reason: 'completed' } }, en: 'Session session-b ended turn 3 (completed)', zh: '会话 session-b 结束了第 3 回合（完成）' },
+  { fact: { summary: '', trigger: { kind: 'session', sessionId: 'session-b', turn: 0, reason: 'max-tokens' } }, en: 'Session session-b ended a turn (max-tokens)', zh: '会话 session-b 结束了一个回合（达到输出上限）' },
+  { fact: { summary: '', trigger: { kind: 'session', sessionId: 'session-b', turn: 2, reason: 'future-reason' } }, en: 'Session session-b ended turn 2 (future-reason)', zh: '会话 session-b 结束了第 2 回合（future-reason）' },
   { fact: { summary: '快照发生变化（状态: exit 0）' }, en: 'Snapshot changed (state: exit 0)', zh: '快照发生变化（状态: 退出码 0）' },
   { fact: { summary: '模式 /ready/ 开始匹配: ready（状态: HTTP 200）' }, en: 'Pattern /ready/ started matching: ready (state: HTTP 200)', zh: '模式 /ready/ 开始匹配: ready（状态: HTTP 200）' },
   { fact: { summary: '外部推送到达（webhook）' }, en: 'External push received (webhook)', zh: '外部推送到达（webhook）' },
@@ -62,6 +65,10 @@ describe('presentation locale', () => {
   it('localizes only known state labels, not raw snapshots or unknown states', () => {
     expect(localizeState('exists (12 bytes)', 'zh')).toBe('存在（12 字节）')
     expect(localizeState('3 process(es)', 'zh')).toBe('3 个进程')
+    expect(localizeState('awaiting turn end', 'zh')).toBe('等待回合结束')
+    expect(localizeState('turn ended (completed)', 'zh')).toBe('回合已结束（完成）')
+    expect(localizeState('turn ended (future-reason)', 'zh')).toBe('回合已结束（future-reason）')
+    expect(localizeState('awaiting turn end', 'en')).toBe('awaiting turn end')
     for (const state of ['HTTP 500', 'openly custom', 'exists unexpected', 'exit custom', 'size=12 mtime=1\n准备']) {
       expect(localizeState(state, 'zh')).toBe(state)
     }

@@ -12,17 +12,21 @@ import { formatFireSummary, translate, type FireTrigger, type Locale } from './l
 export const SENTINEL_CHANGE_TYPE = 'sentinel/change'
 export const SENTINEL_CHANGE_VERSION = 1
 
-/** Probe engines the runtime knows how to drive. `webhook` is push-only: no probing, external callers POST to the hook route. */
-export type SensorKind = 'file' | 'command' | 'http' | 'process' | 'port' | 'webhook'
+/**
+ * Sensor engines the runtime knows how to drive. `webhook` and `session` are
+ * push-only: no probing. Webhooks fire on an inbound POST; `session` watches
+ * fire on the host's durable `turn/end` session event for another session.
+ */
+export type SensorKind = 'file' | 'command' | 'http' | 'process' | 'port' | 'session' | 'webhook'
 
 /** What the agent asked to watch, all data, no code. */
 export interface SensorSpec {
   readonly kind: SensorKind
-  /** file: absolute path; command: shell line; http: URL; process: pgrep pattern; port: "[host:]port"; webhook: human label for the expected caller. */
+  /** file: absolute path; command: shell line; http: URL; process: pgrep pattern; port: "[host:]port"; session: id of the session whose turn-end to observe; webhook: human label for the expected caller. */
   readonly target: string
-  /** Optional regex (source string). Probe kinds: fire on no-match → match transitions. webhook: fire only when the posted payload matches. */
+  /** Optional regex (source string). Probe kinds: fire on no-match → match transitions. webhook: fire only when the posted payload matches. session: fire only when the ended turn's reason kind matches (completed, aborted, blocked, error, max-tokens, interrupted, forked). */
   readonly pattern?: string
-  /** Seconds between probes (ignored for webhook). Clamped to [5, 86400]. */
+  /** Seconds between probes (ignored for webhook and session). Clamped to [5, 86400]. */
   readonly intervalSeconds: number
 }
 
@@ -159,7 +163,7 @@ function decodeObserved(value: unknown): KnownSnapshot {
   return { state: value['state'], snapshot: value['snapshot'] }
 }
 
-const SENSOR_KINDS: readonly SensorKind[] = ['file', 'command', 'http', 'process', 'port', 'webhook']
+const SENSOR_KINDS: readonly SensorKind[] = ['file', 'command', 'http', 'process', 'port', 'session', 'webhook']
 
 export const MIN_INTERVAL_SECONDS = 5
 export const MAX_INTERVAL_SECONDS = 86_400
@@ -289,8 +293,16 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
       } else if (isRecord(rawTrigger) && rawTrigger['kind'] === 'pattern'
         && typeof rawTrigger['pattern'] === 'string' && typeof rawTrigger['match'] === 'string') {
         trigger = { ...rawTrigger, kind: 'pattern', pattern: rawTrigger['pattern'], match: rawTrigger['match'] }
+      } else if (isRecord(rawTrigger) && rawTrigger['kind'] === 'session'
+        && typeof rawTrigger['sessionId'] === 'string' && rawTrigger['sessionId'] !== ''
+        && typeof rawTrigger['reason'] === 'string' && rawTrigger['reason'] !== '') {
+        const turn = rawTrigger['turn']
+        if (typeof turn !== 'number' || !Number.isInteger(turn) || turn < 0) {
+          throw new SentinelLogError('session fire trigger needs a non-negative integer turn')
+        }
+        trigger = { kind: 'session', sessionId: rawTrigger['sessionId'], turn, reason: rawTrigger['reason'] }
       } else {
-        throw new SentinelLogError('fire trigger must be change, webhook, or pattern with string pattern and match')
+        throw new SentinelLogError('fire trigger must be change, webhook, session, or pattern with string pattern and match')
       }
     }
     const state = fact['state']

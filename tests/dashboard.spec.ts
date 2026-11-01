@@ -71,6 +71,18 @@ describe('dashboardHtml', () => {
     expect(html).toContain('即时推送')
   })
 
+  it('renders session watches with turn-end cadence and localized state', () => {
+    const html = dashboardHtml([
+      row({ id: 'watch-3', kind: 'session', target: 'session-b', pattern: '^completed$', lastState: 'awaiting turn end' }),
+    ], [], {}, 'zh')
+    expect(html).toContain('session-b')
+    expect(html).toContain('回合结束时')
+    expect(html).toContain('等待回合结束')
+    const ended = dashboardHtml([row({ kind: 'session', target: 'session-b', lastState: 'turn ended (completed)' })], [], {}, 'en')
+    expect(ended).toContain('on turn end')
+    expect(ended).toContain('turn ended (completed)')
+  })
+
   it('renders a manual cancel button and pending badge per row', () => {
     const html = dashboardHtml([row({ pendingWakeups: 2 })], [], {}, 'zh')
     expect(html).toContain('class="cancel"')

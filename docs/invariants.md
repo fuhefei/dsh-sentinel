@@ -10,12 +10,16 @@ either broken once or is one edit away from breaking.
 2. **Snapshots come in two domains: placeholder and content.** A placeholder
    (`<absent>`, `<unreachable>`, `<none>`, `<push-only>`) means "the target
    itself is missing", not data. Patterns are tested against content only; the
-   edge a pattern waits for is placeholder → matching content. New sensor
+   edge a pattern waits for is placeholder → matching content. New probe
    kinds must register their "target missing" snapshot in the placeholder set
-   in `src/sensors.ts`.
-3. **Firing is edge-triggered, never level-triggered.** A pattern fires on
-   no-match → match; a pattern-less watch fires on any snapshot change after
-   the baseline. Cooldown rate-limits fires; it is not the re-arm mechanism.
+   in `src/sensors.ts`; push-only kinds (`webhook`, `session`) use the
+   push-only placeholder and are skipped by the heartbeat.
+3. **Firing is edge-triggered, never level-triggered.** A probe pattern fires
+   on no-match → match; a pattern-less probe watch fires on any snapshot change
+   after the baseline. Session watches are discrete host events rather than a
+   state diff: every committed `turn/end` is one edge, and their optional
+   pattern is a filter on the turn-end reason kind, not a transition matcher.
+   Cooldown rate-limits fires; it is not the re-arm mechanism.
 4. **Delivery is at-least-once.** A fire is logged to the sidecar before
    delivery; the `delivered` watermark lets a restart requeue fires that never
    reached the agent. Consumers must tolerate a duplicate wakeup.
@@ -24,13 +28,21 @@ either broken once or is one edit away from breaking.
 6. **The sidecar log is the only carrier of truth.** Memory state is a fold of
    `sentinel.jsonl`; every mutation is an appended change, never an edit. A
    corrupt row fails the fold loudly.
-7. **Watches outlive their session's agent.** The host has no session-deleted
-   event, so watches of a deleted session keep probing until cancelled by
-   hand. Manual cancel (`POST /plugins/dsh-sentinel/cancel`, the ✕ in every
-   UI row) is the kill switch of last resort; never assume the agent is
-   reachable. The state route exposes `pendingWakeups` per watch so queued
-   wakeups are visible, not silent.
-8. **Localization is presentation, not sensor data.** Browser surfaces follow
+7. **Watches outlive their session's agent.** A live session leaving the store
+   emits `session/disposed`, but sentinel does not treat it as a cancel: orphan
+   watches keep probing (and `session` watches stay armed on a disposed target)
+   until cancelled by hand. Manual cancel
+   (`POST /plugins/dsh-sentinel/cancel`, the ✕ in every UI row) is the kill
+   switch of last resort; never assume the agent is reachable. The state route
+   exposes `pendingWakeups` per watch so queued wakeups are visible, not
+   silent.
+8. **Session watches consume host events, never re-derive them.** A `session`
+   watch fires from the root-scope `session/event` feed on a durable
+   `turn/end`; it must not poll agents/status, rescan session logs, or invent
+   a baseline. Malformed or unrelated events are ignored. Fires run through the
+   same durable fire path (log, budget, cooldown, wakeup delivery) as every
+   other sensor kind.
+9. **Localization is presentation, not sensor data.** Browser surfaces follow
    the host locale; standalone dashboard links carry that locale explicitly.
    Server messages use the configured `locale` (English by default). Persist
    neutral trigger data alongside the readable summary so viewers can render

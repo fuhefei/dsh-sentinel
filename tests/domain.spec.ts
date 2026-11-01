@@ -80,6 +80,16 @@ describe('normalizeSpec', () => {
     expect(() => normalizeSpec({ kind: 'port', target: '70000' })).toThrow(SentinelLogError)
     expect(() => normalizeSpec({ kind: 'port', target: 'not a port' })).toThrow(SentinelLogError)
   })
+
+  it('accepts session watches: target is the observed session id and pattern is optional', () => {
+    expect(normalizeSpec({ kind: 'session', target: ' session-b ', intervalSeconds: 1 })).toEqual({
+      kind: 'session', target: 'session-b', intervalSeconds: 5,
+    })
+    expect(normalizeSpec({ kind: 'session', target: 'session-b', pattern: '^(completed|max-tokens)$' }).pattern)
+      .toBe('^(completed|max-tokens)$')
+    expect(() => normalizeSpec({ kind: 'session', target: '   ' })).toThrow(SentinelLogError)
+    expect(() => normalizeSpec({ kind: 'session', target: 'session-b', pattern: '(' })).toThrow(SentinelLogError)
+  })
 })
 
 describe('foldSentinelEvents', () => {
@@ -238,6 +248,33 @@ describe('decodeSentinelChange', () => {
       expect(() => decodeSentinelChange({ ...legacy, fact: { ...legacy.fact, trigger } })).toThrow(SentinelLogError)
     }
     expect(() => decodeSentinelChange({ ...legacy, fact: { ...legacy.fact, state: 1 } })).toThrow(SentinelLogError)
+  })
+
+  it('round-trips session fire triggers and rejects malformed ones', () => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:01:00Z').payload
+    const trigger = { kind: 'session', sessionId: 'session-b', turn: 3, reason: 'completed' }
+    const row = { ...legacy, fact: { ...legacy.fact, trigger, after: '{"kind":"completed"}' } }
+    expect(decodeSentinelChange(row)).toEqual(row)
+    for (const bad of [
+      { kind: 'session', sessionId: '', turn: 1, reason: 'completed' },
+      { kind: 'session', sessionId: 's', turn: -1, reason: 'completed' },
+      { kind: 'session', sessionId: 's', turn: 1.5, reason: 'completed' },
+      { kind: 'session', sessionId: 's', turn: 1, reason: '' },
+      { kind: 'session', sessionId: 's', turn: 1 },
+    ]) {
+      expect(() => decodeSentinelChange({ ...legacy, fact: { ...legacy.fact, trigger: bad } })).toThrow(SentinelLogError)
+    }
+  })
+
+  it('round-trips a created session payload', () => {
+    const decoded = decodeSentinelChange(createdEvent('watch-4', {
+      spec: { kind: 'session', target: 'session-b', pattern: '^completed$', intervalSeconds: 30 },
+    }).payload)
+    expect(decoded.change).toBe('created')
+    if (decoded.change !== 'created') return
+    expect(decoded.subscription.spec).toEqual({
+      kind: 'session', target: 'session-b', pattern: '^completed$', intervalSeconds: 30,
+    })
   })
 
   it('round-trips a created payload', () => {
