@@ -10,3 +10,4 @@ lib/*
 driver*.sh
 verify*.sh
 lib/*.bak
+.cache/
