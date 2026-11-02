@@ -1,6 +1,6 @@
 {
   "name": "dsh-sentinel",
-  "version": "0.13.2",
+  "version": "0.14.0",
   "license": "BSD-3-Clause",
   "description": "Condition-driven agent wakeups for DSH: durable file, process, port, command, HTTP, session turn-end and webhook watches with visible subscriptions and trigger history.",
   "type": "module",

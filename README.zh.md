@@ -107,6 +107,7 @@ templates/layouts/document.html  文档元信息与资源链接
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。
 
+- `0.2.1-rc.4` —— 2026-11-02，用 0.14.0 构建做隔离彩排（launcher 从 npm 预装；线上 profile 副本在独立 DSH_HOME 净装）：boot 图 72 条、sentinel 客户端 bundle 含 `sidebar.panellist`、web-shell bundle 正常下发、duty 租约与 state 路由应答、零跳过 bundle；rc.4 的 `session/event` 与 `turn/end` 声明与 rc.2 一致，session 传感器的宿主契约不变。
 - `0.2.1-rc.2` —— 2026-10-19，线上 web 部署由 `0.2.0-rc.2` 升级后实测（profile 净装、launcher 备份与回滚路径保留）：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 71 条、零跳过 bundle、终端插件仍在）。源码无需改动——对真实 `0.2.1-rc.2` 包运行 `tsc -b --noEmit` 通过、全部 76 个测试通过、重建的 `lib/` 逐字节不变——因此 0.13.2 是对齐版本：devDependencies 钉到 `0.2.1-rc.2`、声明 `engines.dsh` 为 `>=0.2.0-0 <0.3.0`，并补上 0.2 世代的展示元数据（`locale/*.json` + 图标），供插件管理器在不激活插件时读取。自 `0.2.1-alpha.4` 起，安装期版本闸门在声明了 `engines.dsh` 时**只**按它判断（已核对的宿主 `evaluatePluginCompatibility` 源码），因此 0.2 线的准入由这个字段承担；peer 范围仍作为老宿主的回退判断。
 - `0.2.1-alpha.1` —— 2026-10-07，对线上 profile 副本的彩排：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 68 条）。能到这一步需要放宽 peer 范围（见下方 `0.2.0-rc.2`）；并直接调用宿主的 `evaluatePluginCompatibility` 核对了版本闸门：当前范围放行 `0.2.0-rc.2` 与 `0.2.1-alpha.1`，仍拒绝 `0.2.0-rc.1` 及更旧。
 - `0.2.0-rc.2` —— 2026-09-30，运行时和客户端构建依赖对齐到此版本，并重新生成 npm、pnpm 锁文件。休眠会话唤醒时从会话投影恢复原 preset，并完整传递默认模型选择，包括思考强度。值守租约固定在运行时创建时的目录；清理等待启动和探测轮次结束后再释放租约。**2026-10-07 补充：**三个 harness peer 由"精确单一版本"放宽为 `>=0.2.0-rc.2 <0.3.0`，一份构建即可服务整条 0.2 线，而不是只能服务某一个发行版——精确钉版会让插件在紧邻的下一个 0.2.x 上直接装不上，0.1.7 升 0.2.0 时就是这么坏的。
@@ -131,7 +132,7 @@ dsh plugin --profile web add dsh-sentinel
 或者直接从 git 装（构建产物直接提交在仓库里，git 源安装不需要跑构建）：
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.13.2"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.0"
 ```
 
 示例里的 tag 会随最新 release 更新；更旧的 tag 钉的是更旧的宿主线，抄进别的 dsh 版本前请先看 [Releases](https://github.com/fuhefei/dsh-sentinel/releases)（或干脆去掉 tag 跟 `main`）。
