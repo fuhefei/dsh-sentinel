@@ -107,6 +107,7 @@ templates/layouts/document.html  文档元信息与资源链接
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。
 
+- `0.2.2-rc.1` —— 2026-11-10，`v0.14.1` 对齐最新 DSH 0.2 线。构建依赖升级到 `0.2.2-rc.1`，`schemastery` 升到 `3.19.x`，显式声明 session projection 类型入口。DSH `0.2.2` 将投影状态返回值改为 `unknown`，恢复保存的 preset 时增加可空字符串边界收窄。`pnpm typecheck`、`pnpm build` 和全部 208 个测试通过；线上 profile 已加载 `dsh-sentinel 0.14.1`，`check-sentinel-deploy.sh` 返回 `RESULT: PASS`。
 - `0.2.1-rc.4` —— 2026-11-02，线上 web 部署由 `0.2.1-rc.2` 升级、并同时部署 `v0.14.0` 插件（launcher 备份 + profile 净装 + 自动核验/回滚保留；升级前先在线上 profile 副本上彩排）：launcher `0.2.1-rc.4`、sentinel **0.14.0**、web-shell `0.2.0`；boot 图 72 条、两个客户端 bundle 正常下发、duty 租约与 state 路由应答、零跳过 bundle / 零 activation warning、profile 无宿主 `@deepseek-ai` 依赖。profile patch 已配置 `locale: zh`（服务端中文消息）。部署自带的 `check-sentinel-deploy.sh` 返回 `RESULT: PASS`。
 - `0.2.1-rc.2` —— 2026-10-19，线上 web 部署由 `0.2.0-rc.2` 升级后实测（profile 净装、launcher 备份与回滚路径保留）：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 71 条、零跳过 bundle、终端插件仍在）。源码无需改动——对真实 `0.2.1-rc.2` 包运行 `tsc -b --noEmit` 通过、全部 76 个测试通过、重建的 `lib/` 逐字节不变——因此 0.13.2 是对齐版本：devDependencies 钉到 `0.2.1-rc.2`、声明 `engines.dsh` 为 `>=0.2.0-0 <0.3.0`，并补上 0.2 世代的展示元数据（`locale/*.json` + 图标），供插件管理器在不激活插件时读取。自 `0.2.1-alpha.4` 起，安装期版本闸门在声明了 `engines.dsh` 时**只**按它判断（已核对的宿主 `evaluatePluginCompatibility` 源码），因此 0.2 线的准入由这个字段承担；peer 范围仍作为老宿主的回退判断。
 - `0.2.1-alpha.1` —— 2026-10-07，对线上 profile 副本的彩排：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 68 条）。能到这一步需要放宽 peer 范围（见下方 `0.2.0-rc.2`）；并直接调用宿主的 `evaluatePluginCompatibility` 核对了版本闸门：当前范围放行 `0.2.0-rc.2` 与 `0.2.1-alpha.1`，仍拒绝 `0.2.0-rc.1` 及更旧。
@@ -132,7 +133,7 @@ dsh plugin --profile web add dsh-sentinel
 或者直接从 git 装（构建产物直接提交在仓库里，git 源安装不需要跑构建）：
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.1"
 ```
 
 示例里的 tag 会随最新 release 更新；更旧的 tag 钉的是更旧的宿主线，抄进别的 dsh 版本前请先看 [Releases](https://github.com/fuhefei/dsh-sentinel/releases)（或干脆去掉 tag 跟 `main`）。

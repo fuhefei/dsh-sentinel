@@ -669,7 +669,7 @@ class SentinelRuntime {
               if (presets === undefined) return
               const projections = this.ctx.get?.('sessionProjections')
               if (projections === undefined) throw new Error('dsh-sentinel: agentPresets requires sessionProjections to restore the saved preset')
-              const presetId = projections.stateOf(agent.session, 'agentPreset') ?? undefined
+              const presetId = (projections.stateOf(agent.session, 'agentPreset') as string | null | undefined) ?? undefined
               await presets.mount(agentCtx, presetId)
             },
           })
