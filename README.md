@@ -105,6 +105,10 @@ First-probe semantics: a pattern-less probe watch absorbs its first observation 
 
 ## Compatibility
 
+`v0.14.2` fixes [#17](https://github.com/fuhefei/dsh-sentinel/issues/17): webhook registration now reads the optional `webServer` through Cordis service lookup, so returning the hook URL no longer throws an injection error. Web profiles retain the actual listening port; headless profiles return a relative hook path. Regression tests exercise both modes with real Cordis plugin contexts.
+
+Validated on 2026-11-11: typecheck, build and all 210 tests pass. The installed release also passes webhook registration, HTTP push and wakeup delivery on the live host's Cordis `4.0.5`; the DSH `0.2.1-rc.4` web deployment loads Sentinel `0.14.2` and passes `check-sentinel-deploy.sh`.
+
 Verified against these harness versions (plugin loads, duty lease is held, web routes answer). Session watches require the host's root-scope `session/event` feed, which the supported 0.2.x line provides; on a host outside that range the watch would be accepted but never fire. Sidecar rollback note: a `sentinel.jsonl` containing session-watch rows (new `kind`, or `trigger.kind: "session"` on fired rows) is rejected by 0.13.2 and older readers — cancel those watches before downgrading.
 
 - `0.2.2-rc.1` — 2026-11-10, `v0.14.1` refresh against the latest DSH 0.2 line. Build dependencies move to `0.2.2-rc.1`, `schemastery` to `3.19.x`, and the session-projection type surface is declared explicitly. DSH `0.2.2` returns projection state as `unknown`; preset restoration now narrows the nullable saved id before mounting. `pnpm typecheck`, `pnpm build`, and all 208 tests pass; the live profile loads `dsh-sentinel 0.14.1` and `check-sentinel-deploy.sh` returns `RESULT: PASS`.
@@ -133,7 +137,7 @@ dsh plugin --profile web add dsh-sentinel
 Or straight from git (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.1"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.2"
 ```
 
 The tag in this example tracks the latest release; older tags pin older host lines, so check the [Releases](https://github.com/fuhefei/dsh-sentinel/releases) page (or drop the tag and follow `main`) before copying into a different dsh version.

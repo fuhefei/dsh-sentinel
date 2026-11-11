@@ -427,7 +427,9 @@ class SentinelRuntime {
    * headless (no webServer), where nothing listens anyway. The session
    * qualifier disambiguates watch ids, which are allocated per session. */
   hookUrl(sessionId: string, id: string): string {
-    const port = this.ctx.webServer?.port
+    // webServer 是可选服务；直接读取属性会触发 Cordis 的静态注入检查。
+    const webServer = this.ctx.get?.('webServer') as ContextLike['webServer'] | undefined
+    const port = webServer?.port
     const path = `${HOOK_PATH}?id=${id}&s=${encodeURIComponent(sessionId)}`
     return port === undefined ? path : `http://localhost:${String(port)}${path}`
   }

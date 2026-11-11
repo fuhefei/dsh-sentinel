@@ -105,6 +105,10 @@ templates/layouts/document.html  文档元信息与资源链接
 
 ## 兼容性
 
+`v0.14.2` 修复 [#17](https://github.com/fuhefei/dsh-sentinel/issues/17)：注册 webhook 时通过 Cordis 服务查询读取可选的 `webServer`，返回 hook URL 时不再抛出注入异常。Web profile 继续使用实际监听端口，headless profile 返回相对 hook 路径。新增回归测试使用真实 Cordis 插件上下文覆盖两种模式。
+
+2026-11-11 验证：类型检查、构建和全部 210 个测试通过。已安装的发布包使用线上宿主的 Cordis `4.0.5`，通过 webhook 注册、HTTP 推送和唤醒投递验证；DSH `0.2.1-rc.4` 的 web 部署已加载 Sentinel `0.14.2`，`check-sentinel-deploy.sh` 通过。
+
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。
 
 - `0.2.2-rc.1` —— 2026-11-10，`v0.14.1` 对齐最新 DSH 0.2 线。构建依赖升级到 `0.2.2-rc.1`，`schemastery` 升到 `3.19.x`，显式声明 session projection 类型入口。DSH `0.2.2` 将投影状态返回值改为 `unknown`，恢复保存的 preset 时增加可空字符串边界收窄。`pnpm typecheck`、`pnpm build` 和全部 208 个测试通过；线上 profile 已加载 `dsh-sentinel 0.14.1`，`check-sentinel-deploy.sh` 返回 `RESULT: PASS`。
@@ -133,7 +137,7 @@ dsh plugin --profile web add dsh-sentinel
 或者直接从 git 装（构建产物直接提交在仓库里，git 源安装不需要跑构建）：
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.1"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.2"
 ```
 
 示例里的 tag 会随最新 release 更新；更旧的 tag 钉的是更旧的宿主线，抄进别的 dsh 版本前请先看 [Releases](https://github.com/fuhefei/dsh-sentinel/releases)（或干脆去掉 tag 跟 `main`）。

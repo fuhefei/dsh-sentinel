@@ -3,8 +3,9 @@ import { createServer as createNetServer } from 'node:net'
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it } from 'vitest'
-import { apply, CANCEL_PATH, DASHBOARD_PATH, DEFAULT_CONFIG, HOOK_PATH, STATE_PATH, storePath } from '../src/index.ts'
+import { apply, CANCEL_PATH, DASHBOARD_PATH, DEFAULT_CONFIG, HOOK_PATH, inject, STATE_PATH, storePath } from '../src/index.ts'
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
@@ -105,6 +106,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
         return () => {}
       },
     }
+    services['webServer'] = rootCtx['webServer']
   }
   // Cordis dynamic-injection double: fires only when the service exists.
   rootCtx['inject'] = (_deps: string[], callback: (ctx: unknown) => void) => {
@@ -568,6 +570,35 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(harness.followups.length).toBe(1)
     expect(harness.followups[0]).toContain('status=success build=42')
   }, 10_000)
+
+  it.each([false, true])('registers webhook watches in a real Cordis context (headless: %s)', async headless => {
+    await freshHome()
+    const harness = makeHarness([], { headless })
+    harnesses.push(harness)
+    const ctx = new Context()
+    harness.cleanups.push(() => ctx.fiber.dispose())
+    for (const service of inject) ctx.provide(service, harness.rootCtx[service])
+    if (!headless) {
+      const server = ctx.plugin((sctx) => {
+        sctx.provide('webServer', { ...harness.rootCtx['webServer'] as object, port: 45678 })
+      })
+      await server.inertia
+    }
+    const fiber = ctx.plugin({ inject, apply: sctx => apply(sctx as unknown as Parameters<typeof apply>[0]) })
+    await fiber.inertia
+    expect(fiber.state).toBe(2)
+    // 真实 Proxy 禁止插件从未声明注入的上下文直接访问 webServer。
+    expect(() => (fiber.ctx as unknown as { webServer: unknown }).webServer)
+      .toThrow('cannot get property "webServer" without inject')
+    ctx.emit('agent/created', { agent: harness.agent } as never)
+
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    const created = await watchTool.execute({ kind: 'webhook', target: 'ci-pipeline', note: 'regression #17', max_fires: 1 }, {}) as { hookPath?: string }
+    const path = `${HOOK_PATH}?id=watch-1&s=session-e2e`
+    expect(created.hookPath).toBe(headless ? path : `http://localhost:45678${path}`)
+    expect(harness.routes.some(route => route.path === HOOK_PATH)).toBe(!headless)
+  })
 
   it('fires a session watch on the target session\'s turn/end, honoring the reason pattern', async () => {
     await freshHome()
