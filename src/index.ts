@@ -47,6 +47,8 @@ import {
   MAX_SUBSCRIPTIONS_PER_AGENT,
   MIN_INTERVAL_SECONDS,
   MAX_INTERVAL_SECONDS,
+  MIN_TIMEOUT_SECONDS,
+  MAX_TIMEOUT_SECONDS,
   normalizeSpec,
   renderWakeup,
   SENTINEL_CHANGE_TYPE,
@@ -745,7 +747,7 @@ class SentinelRuntime {
     return pending
   }
 
-  async create(sessionId: string, spec: unknown, note: string, maxFires: number, cooldownSeconds: number, expiresInSeconds?: number): Promise<Subscription> {
+  async create(sessionId: string, spec: unknown, note: string, maxFires: number, cooldownSeconds: number, expiresInSeconds?: number, timeoutSeconds?: number): Promise<Subscription> {
     const normalized = normalizeSpec(spec)
     const watch = this.watchOf(sessionId)
     if (watch.folded.active.size >= this.config.maxSubscriptionsPerSession) {
@@ -761,6 +763,9 @@ class SentinelRuntime {
       cooldownSeconds,
       ...(expiresInSeconds !== undefined
         ? { expiresAt: new Date(Date.now() + expiresInSeconds * 1000).toISOString() }
+        : {}),
+      ...(timeoutSeconds !== undefined
+        ? { timeoutAt: new Date(Date.now() + timeoutSeconds * 1000).toISOString() }
         : {}),
       createdAt,
     }
@@ -828,6 +833,31 @@ class SentinelRuntime {
             }
           })
           continue
+        }
+        if (sub.timeoutAt !== undefined) {
+          const deadline = Date.parse(sub.timeoutAt)
+          if (Number.isFinite(deadline) && deadline <= now) {
+            if (sub.fireCount > 0) {
+              // The planned deadline is a "never fired" safety net, not a
+              // periodic debrief: a watch that already fired is retired
+              // silently. Never withdraw a wakeup that is still owed — a
+              // cancel row drops the undelivered fire from the boot requeue,
+              // so wait until delivery has been watermarked.
+              if (!watch.folded.undeliveredFires.some(entry => entry.id === sub.id)) {
+                tasks.push(async () => {
+                  try {
+                    await this.cancel(watch.sessionId, sub.id, 'expired')
+                  } catch (error: unknown) {
+                    this.warn(`timeout retire failed for ${sub.id}: ${describe(error)}`)
+                  }
+                })
+              }
+              continue
+            }
+            const state = watch.probes.get(sub.id)
+            tasks.push(async () => { await this.fireTimeout(watch, sub, state) })
+            continue
+          }
         }
         if (sub.spec.kind === 'webhook' || sub.spec.kind === 'session') continue
         const state = watch.probes.get(sub.id)
@@ -1068,6 +1098,7 @@ class SentinelRuntime {
           trigger: fact.trigger,
           state: fact.state,
           after: fact.after,
+          ...(sub.timeoutAt !== undefined ? { timeoutAt: sub.timeoutAt } : {}),
         }),
       })
       if (!response.ok) this.warn(`notify webhook returned HTTP ${String(response.status)}`)
@@ -1119,6 +1150,41 @@ class SentinelRuntime {
       // Keep the pre-fire baseline: the same transition re-fires next heartbeat.
       state.lastSnapshot = previousSnapshot
       this.warn(`fire failed for ${sub.id} (will retry): ${describe(error)}`)
+    }
+  }
+
+  /**
+   * One planned-deadline wakeup: the condition never fired before
+   * {@link Subscription.timeoutAt}. The fired row carries trigger kind
+   * `timeout`; the fold retires the watch from that row (never a fire-then-
+   * cancel pair, which would withdraw the undelivered wakeup), so a crash can
+   * neither lose nor duplicate it. The last probe state/snapshot rides along
+   * so the agent can judge whether the watch was misconfigured or the task is
+   * stuck.
+   */
+  private async fireTimeout(watch: SessionWatch, sub: Subscription, state: ProbeState | undefined): Promise<void> {
+    const deadline = sub.timeoutAt ?? new Date().toISOString()
+    const lastState = state?.lastState
+    const snapshot = state?.lastSnapshot
+    const trigger = { kind: 'timeout' as const, deadline }
+    try {
+      await this.fireSubscription(watch, sub, {
+        fireNumber: sub.fireCount + 1,
+        summary: formatFireSummary({
+          summary: '',
+          trigger,
+          ...(lastState !== undefined ? { state: lastState } : {}),
+        }, this.config.locale ?? 'en'),
+        trigger,
+        ...(lastState !== undefined ? { state: lastState } : {}),
+        before: '',
+        after: clipExcerpt(snapshot ?? ''),
+        probeMs: 0,
+      })
+    } catch (error: unknown) {
+      // Keep the watch armed: the deadline is already past, so the next
+      // heartbeat retries the same fire.
+      this.warn(`timeout fire failed for ${sub.id} (will retry): ${describe(error)}`)
     }
   }
 
@@ -1187,6 +1253,7 @@ const WATCH_OUTPUT_SCHEMA = {
     maxFires: { type: 'integer', required: true },
     note: { type: 'string', required: true },
     hookPath: { type: 'string' },
+    timeoutSeconds: { type: 'integer' },
   },
 } as const
 
@@ -1210,6 +1277,7 @@ const LIST_OUTPUT_SCHEMA = {
           maxFires: { type: 'integer', required: true },
           note: { type: 'string', required: true },
           lastState: { type: 'string' },
+          timeoutAt: { type: 'string' },
         },
       },
     },
@@ -1254,7 +1322,9 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       ' fire only when the payload matches, and session watches fire only when the ended turn\'s reason kind',
       ' matches (completed, aborted, blocked, error, max-tokens, interrupted, forked). Without it, probe kinds',
       ' fire on any snapshot change after the baseline, webhooks fire on any POST, and session watches fire on',
-      ' any turn end.',
+      ' any turn end. A "timeout_seconds" planned deadline arms a one-shot TIMEOUT wakeup instead: if no',
+      ' condition fire arrives within that many seconds, the watch is retired and you are woken with a timeout',
+      ' notice (including the last probe state) so you can check progress or fix a misconfigured watch.',
     ].join(''),
     parameters: {
       kind: {
@@ -1291,13 +1361,17 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       },
       expires_in_seconds: {
         type: 'number',
-        description: 'Optional lifetime; the watch cancels itself when this elapses without firing.',
+        description: 'Optional lifetime; the watch cancels itself silently when this elapses (no wakeup, even if it never fired).',
+      },
+      timeout_seconds: {
+        type: 'number',
+        description: `Optional planned deadline for a one-shot TIMEOUT wakeup: when this many seconds pass with no condition fire, the watch fires one timeout wakeup (with the last probe state) and is retired (${String(MIN_TIMEOUT_SECONDS)}–${String(MAX_TIMEOUT_SECONDS)} seconds; keep it longer than interval_seconds so at least one probe can observe the target).`,
       },
     },
     output: {
       schema: WATCH_OUTPUT_SCHEMA,
-      render: (_args: unknown, value: { id: string; kind: string; target: string; intervalSeconds: number; hookPath?: string }) =>
-        textBlock(translate(locale, 'registered', { id: value.id, kind: value.kind, target: value.target }) + (value.hookPath !== undefined
+      render: (_args: unknown, value: { id: string; kind: string; target: string; intervalSeconds: number; hookPath?: string; timeoutSeconds?: number }) => {
+        const cadence = value.hookPath !== undefined
           ? '\n' + translate(locale, 'hookAddress', { url: value.hookPath })
             + (value.hookPath.startsWith('http') ? translate(locale, 'hookHost') : '') + translate(locale, 'hookResident')
           : value.kind === 'session'
@@ -1305,7 +1379,10 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
             : translate(locale, 'probeCadence', {
               interval: value.intervalSeconds,
               filePush: value.kind === 'file' ? translate(locale, 'filePush') : '',
-            }))),
+            })
+        return textBlock(translate(locale, 'registered', { id: value.id, kind: value.kind, target: value.target }) + cadence
+          + (value.timeoutSeconds !== undefined ? translate(locale, 'timeoutArmed', { seconds: value.timeoutSeconds }) : ''))
+      },
     },
     async execute(args: {
       kind: string
@@ -1316,6 +1393,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       max_fires?: number
       cooldown_seconds?: number
       expires_in_seconds?: number
+      timeout_seconds?: number
     }) {
       const note = args.note.trim()
       if (note === '') throw new SentinelLogError('note must not be empty — tell your future self why this watch exists')
@@ -1323,6 +1401,16 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
       const maxFires = args.max_fires !== undefined ? Math.max(1, Math.round(args.max_fires)) : 1
       const cooldown = args.cooldown_seconds !== undefined ? Math.max(0, Math.round(args.cooldown_seconds)) : runtime.config.defaultCooldownSeconds
       const expires = args.expires_in_seconds !== undefined ? Math.max(runtime.config.heartbeatMs / 1000, Math.round(args.expires_in_seconds)) : undefined
+      let timeout: number | undefined
+      if (args.timeout_seconds !== undefined) {
+        if (typeof args.timeout_seconds !== 'number' || !Number.isFinite(args.timeout_seconds) || args.timeout_seconds <= 0) {
+          throw new SentinelLogError('timeout_seconds must be a positive, finite number of seconds')
+        }
+        timeout = Math.min(MAX_TIMEOUT_SECONDS, Math.max(MIN_TIMEOUT_SECONDS, Math.round(args.timeout_seconds)))
+        if (expires !== undefined && timeout >= expires) {
+          throw new SentinelLogError(`timeout_seconds (${String(timeout)}) must be shorter than expires_in_seconds (${String(expires)}), or the silent TTL would cancel the watch before the timeout wakeup can fire`)
+        }
+      }
       const subscription = await runtime.create(
         agent.id,
         {
@@ -1335,6 +1423,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
         maxFires,
         cooldown,
         expires,
+        timeout,
       )
       return {
         id: subscription.id,
@@ -1343,6 +1432,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
         intervalSeconds: subscription.spec.intervalSeconds,
         maxFires: subscription.maxFires,
         note: subscription.note,
+        ...(timeout !== undefined ? { timeoutSeconds: timeout } : {}),
         ...(subscription.spec.kind === 'webhook'
           ? { hookPath: runtime.hookUrl(agent.id, subscription.id) }
           : {}),
@@ -1356,13 +1446,14 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
     parameters: {},
     output: {
       schema: LIST_OUTPUT_SCHEMA,
-      render: (_args: unknown, value: { subscriptions: Array<{ id: string; kind: string; target: string; fireCount: number; maxFires: number; lastState?: string }> }) =>
+      render: (_args: unknown, value: { subscriptions: Array<{ id: string; kind: string; target: string; fireCount: number; maxFires: number; lastState?: string; timeoutAt?: string }> }) =>
         textBlock(value.subscriptions.length === 0
           ? translate(locale, 'noWatches')
-          : value.subscriptions.map(row => translate(locale, 'listRow', {
+          : value.subscriptions.map(row => translate(locale, row.timeoutAt === undefined ? 'listRow' : 'listRowTimeout', {
             id: row.id, kind: row.kind, target: row.target,
             state: row.lastState === undefined ? translate(locale, 'notProbed') : localizeState(row.lastState, locale),
             count: row.fireCount, max: row.maxFires,
+            ...(row.timeoutAt !== undefined ? { timeout: row.timeoutAt } : {}),
           })).join('\n')),
     },
     async execute() {
@@ -1377,6 +1468,7 @@ function registerSentinelTools(runtime: SentinelRuntime, toolCtx: ContextLike, a
           fireCount: sub.fireCount,
           maxFires: sub.maxFires,
           note: sub.note,
+          ...(sub.timeoutAt !== undefined ? { timeoutAt: sub.timeoutAt } : {}),
           ...(watch.probes.get(sub.id)?.lastState !== undefined ? { lastState: watch.probes.get(sub.id)?.lastState } : {}),
         })),
       }
@@ -1416,6 +1508,8 @@ export interface WatchRow {
   maxFires: number
   createdAt: string
   expiresAt?: string
+  /** Planned-deadline wakeup instant (RFC 3339); absent = no timeout armed. */
+  timeoutAt?: string
   lastState?: string
   lastProbeAt?: number
   nextDueAt?: number
@@ -1450,6 +1544,7 @@ function collectWatchRows(runtime: SentinelRuntime, ctx: ContextLike, sessionId:
         maxFires: sub.maxFires,
         createdAt: sub.createdAt,
         expiresAt: sub.expiresAt,
+        timeoutAt: sub.timeoutAt,
         lastState: probeState?.lastState,
         lastProbeAt: probeState?.lastProbeAt,
         nextDueAt: probeState?.nextDueAt,

@@ -9,6 +9,8 @@ const cases: ReadonlyArray<{ fact: FireMessage; en: string; zh: string }> = [
   { fact: { summary: '', trigger: { kind: 'session', sessionId: 'session-b', turn: 3, reason: 'completed' } }, en: 'Session session-b ended turn 3 (completed)', zh: '会话 session-b 结束了第 3 回合（完成）' },
   { fact: { summary: '', trigger: { kind: 'session', sessionId: 'session-b', turn: 0, reason: 'max-tokens' } }, en: 'Session session-b ended a turn (max-tokens)', zh: '会话 session-b 结束了一个回合（达到输出上限）' },
   { fact: { summary: '', trigger: { kind: 'session', sessionId: 'session-b', turn: 2, reason: 'future-reason' } }, en: 'Session session-b ended turn 2 (future-reason)', zh: '会话 session-b 结束了第 2 回合（future-reason）' },
+  { fact: { summary: '', trigger: { kind: 'timeout', deadline: '2026-08-12T00:10:00.000Z' }, state: 'absent' }, en: 'No condition fire before the planned deadline (state: absent)', zh: '计划截止时间前未触发（状态: 不存在）' },
+  { fact: { summary: '', trigger: { kind: 'timeout', deadline: '2026-08-12T00:10:00.000Z' } }, en: 'No condition fire before the planned deadline', zh: '计划截止时间前未触发' },
   { fact: { summary: '快照发生变化（状态: exit 0）' }, en: 'Snapshot changed (state: exit 0)', zh: '快照发生变化（状态: 退出码 0）' },
   { fact: { summary: '模式 /ready/ 开始匹配: ready（状态: HTTP 200）' }, en: 'Pattern /ready/ started matching: ready (state: HTTP 200)', zh: '模式 /ready/ 开始匹配: ready（状态: HTTP 200）' },
   { fact: { summary: '外部推送到达（webhook）' }, en: 'External push received (webhook)', zh: '外部推送到达（webhook）' },

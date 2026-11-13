@@ -8,7 +8,7 @@
 
 ## 工作原理
 
-Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 sidecar 日志（`$DSH_HOME/sentinel.jsonl`）折叠成活跃订阅，按共享的 5 秒心跳探测探测类传感器，同时监听宿主所有已发布会话的持久 `turn/end` 事件供 `session` 传感器使用，命中后走官方 followup 通道投递唤醒——必要时先复活休眠会话的 agent。所以订阅能扛住进程重启；server 停机期间变真的条件，会在下一次探测时补触发（session 类 watch 在下次观察到回合结束时触发）。
+Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 sidecar 日志（`$DSH_HOME/sentinel.jsonl`）折叠成活跃订阅，按共享的 5 秒心跳探测探测类传感器，同时监听宿主所有已发布会话的持久 `turn/end` 事件供 `session` 传感器使用，命中后走官方 followup 通道投递唤醒——必要时先复活休眠会话的 agent。所以订阅能扛住进程重启；server 停机期间变真的条件，会在下一次探测时补触发（session 类 watch 在下次观察到回合结束时触发）。watch 还可以带一个计划截止时间（`timeout_seconds`）：若到点仍从未触发，哨兵会发一次超时唤醒并注销该 watch——详见[计划超时](#计划超时)。
 
 值守是常驻进程的事：探测和触发投递只在有一个长期运行的 dsh 进程（通常是 `dsh web`）时进行。一次性 headless 运行也能加载插件、创建/列出/取消 watch，但进程退出后没人探测——等下一个常驻进程起来，这些 watch 自动恢复值守。
 
@@ -35,6 +35,23 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 带 `pattern` 时，探测类传感器在该正则的"不匹配→匹配"边沿触发，webhook 只接受匹配的载荷，session watch 只在回合结束原因匹配该正则时触发（原因取值：`completed`、`max-tokens`、`aborted`、`blocked`、`error`、`interrupted`、`forked`）；不带时，探测类传感器对基线之后的任何变化触发，webhook 对任何 POST 触发，session watch 对任何回合结束触发。
 
 session watch 让串行会话链无需在提示词里互相戳：`{ "kind": "session", "target": "<另一个会话 id>", "note": "第一步跑完了，轮到你了", "maxFires": 1 }` 会在目标会话结束回合时唤醒当前会话；加 `pattern: "^completed$"` 则只认干净完成（崩溃或中止的会话永远不会满足，链条自然停住）。事件源是宿主持久的 `turn/end`，没有探测基线，也不走心跳。若某个回合结束时没有任何常驻 dsh 进程在观察事件，该次结束不会被事后补发——需要扛住整段停机时间的链条应改用可探测的闸门。
+
+## 计划超时
+
+`timeout_seconds` 给任意 watch 加一个计划截止时间。若到点仍没有任何条件触发，哨兵会投递一次 **超时唤醒**——包含注册时的便签、计划截止时间和最后一次探测状态/快照——让 agent 检查被监控的任务是否卡住、或 watch 本身是否配错（目标写错、pattern 永远匹配不上、进程不存在），随后注销该 watch。这正是它与 `expires_in_seconds` 的区别：后者仍是静默的生命周期上限，到期只是取消；超时则会唤醒 agent。
+
+```json
+{ "kind": "command", "target": "npm run build", "note": "构建结束后继续部署", "maxFires": 1, "timeout_seconds": 600 }
+```
+
+卡住或配错的 watch 正需要这种兜底：一个"5 分钟"的任务不会再悄悄拖成半小时。
+
+- 截止时间走共享心跳扫描，因此能扛住重启；若停机期间已经过点，会在启动后补触发（与探测类条件一致）。精度为一个心跳。
+- 它是终结性的、至多触发一次：超时触发后 watch 即被注销，即使触发预算仍有剩余。
+- 已经触发过的 watch 到点会被静默注销——截止时间只兜底"从未触发"的情况；想要到点复盘请另注册一个 watch。
+- session 与 webhook watch 同样适用：它们不探测，超时唤醒会带上其最后状态（`awaiting turn end` / `awaiting push`）。
+- 请让 `timeout_seconds` 大于 `interval_seconds`，保证至少有一次探测能观察到目标；若同时给出 `timeout_seconds >= expires_in_seconds`，参数会被拒绝。
+- dock 行与 dashboard 的 **截止** 列都会显示该截止时间的倒计时。
 
 ## 配置
 
@@ -85,7 +102,7 @@ templates/layouts/document.html  文档元信息与资源链接
 
 ## 工具
 
-- `sentinel_watch` — 注册 watch：`kind`（`file`、`command`、`http`、`process`、`port`、`session` 或 `webhook`）、`target`、可选 `pattern`、`interval`（5–86400 秒，默认 30；`session` 与 `webhook` 忽略）、`note`（随每次唤醒原样送达）、`maxFires`（默认 1：一次性）、`cooldown`（默认 60 秒）、可选 `ttl`。`session` 的 `target` 是要观察 `turn/end` 的会话 id。
+- `sentinel_watch` — 注册 watch：`kind`（`file`、`command`、`http`、`process`、`port`、`session` 或 `webhook`）、`target`、可选 `pattern`、`interval`（5–86400 秒，默认 30；`session` 与 `webhook` 忽略）、`note`（随每次唤醒原样送达）、`maxFires`（默认 1：一次性）、`cooldown`（默认 60 秒）、可选 `expires_in_seconds`（静默生命周期上限）、可选 `timeout_seconds`（计划截止时间，到点仍未触发则发一次超时唤醒）。`session` 的 `target` 是要观察 `turn/end` 的会话 id。
 - `sentinel_list` — 列出活跃 watch 及其实时探测状态。
 - `sentinel_cancel` — 按 id 取消一条 watch。
 
@@ -109,7 +126,7 @@ templates/layouts/document.html  文档元信息与资源链接
 
 2026-11-11 验证：类型检查、构建和全部 210 个测试通过。已安装的发布包使用线上宿主的 Cordis `4.0.5`，通过 webhook 注册、HTTP 推送和唤醒投递验证；DSH `0.2.1-rc.4` 的 web 部署已加载 Sentinel `0.14.2`，`check-sentinel-deploy.sh` 通过。
 
-在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。
+在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。超时唤醒同理：`timeout_seconds` watch 超时后写入的 fired 行带 `trigger.kind: "timeout"`（0.15.0 起），会被 0.14.x 及更旧的 reader 拒绝——降级前先取消带超时的 watch。
 
 - `0.2.2-rc.1` —— 2026-11-10，`v0.14.1` 对齐最新 DSH 0.2 线。构建依赖升级到 `0.2.2-rc.1`，`schemastery` 升到 `3.19.x`，显式声明 session projection 类型入口。DSH `0.2.2` 将投影状态返回值改为 `unknown`，恢复保存的 preset 时增加可空字符串边界收窄。`pnpm typecheck`、`pnpm build` 和全部 208 个测试通过；线上 profile 已加载 `dsh-sentinel 0.14.1`，`check-sentinel-deploy.sh` 返回 `RESULT: PASS`。
 - `0.2.1-rc.4` —— 2026-11-02，线上 web 部署由 `0.2.1-rc.2` 升级、并同时部署 `v0.14.0` 插件（launcher 备份 + profile 净装 + 自动核验/回滚保留；升级前先在线上 profile 副本上彩排）：launcher `0.2.1-rc.4`、sentinel **0.14.0**、web-shell `0.2.0`；boot 图 72 条、两个客户端 bundle 正常下发、duty 租约与 state 路由应答、零跳过 bundle / 零 activation warning、profile 无宿主 `@deepseek-ai` 依赖。profile patch 已配置 `locale: zh`（服务端中文消息）。部署自带的 `check-sentinel-deploy.sh` 返回 `RESULT: PASS`。

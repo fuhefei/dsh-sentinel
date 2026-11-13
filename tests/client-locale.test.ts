@@ -10,12 +10,18 @@ const fixtures = {
   watches: [{
     sessionId: 'session-1', live: true, id: 'watch-1', kind: 'file', target: '/tmp/用户.txt',
     intervalSeconds: 30, note: '用户提供的便签', fireCount: 1, maxFires: 2, lastState: 'absent',
+    timeoutAt: '2026-01-01T01:03:03.000Z',
   }],
   recentFires: [{
     sessionId: 'session-1', id: 'watch-1', at: '2026-01-01T01:02:03.000Z',
     summary: '模式 /READY/ 开始匹配: READY（状态: absent）',
     trigger: { kind: 'pattern' as const, pattern: 'READY', match: 'READY' }, state: 'absent',
     note: '用户提供的便签', before: '原始快照', after: 'READY 用户数据',
+  }, {
+    sessionId: 'session-1', id: 'watch-1', at: '2026-01-01T01:02:04.000Z',
+    summary: '计划截止时间前未触发（状态: absent）',
+    trigger: { kind: 'timeout' as const, deadline: '2026-01-01T01:03:03.000Z' }, state: 'absent',
+    note: '用户提供的便签', before: '', after: '最后一次观测用户数据',
   }, {
     sessionId: 'session-1', id: 'legacy-watch', at: '2025-12-01T01:02:03.000Z',
     summary: '快照发生变化（状态: absent）',
@@ -203,6 +209,8 @@ describe('client host locale', () => {
     expect(body.text).toContain('Recent fires')
     expect(body.text).toContain('Pattern /READY/ started matching: READY (state: absent)')
     expect(body.text).toContain('Snapshot changed (state: absent)')
+    expect(body.text).toContain('No condition fire before the planned deadline (state: absent)')
+    expect(body.text).toContain('timeout in 60s')
     expect(body.text).toContain('note: 用户提供的便签')
     expect(body.text).toContain('原始快照')
     expect(body.text).not.toContain('开始匹配')
@@ -222,6 +230,8 @@ describe('client host locale', () => {
     const body = view(renderer)
     expect(body.text).toContain('最近触发')
     expect(body.text).toContain('模式 /READY/ 开始匹配: READY（状态: 不存在）')
+    expect(body.text).toContain('计划截止时间前未触发（状态: 不存在）')
+    expect(body.text).toContain('超时 60s')
     expect(body.text).toContain('便签：用户提供的便签')
     expect(body.text).toContain('不存在 · 触发 1/2')
     expect(body.hrefs).toContain('/plugins/dsh-sentinel/dashboard?lang=zh')

@@ -19,7 +19,9 @@ either broken once or is one edit away from breaking.
    after the baseline. Session watches are discrete host events rather than a
    state diff: every committed `turn/end` is one edge, and their optional
    pattern is a filter on the turn-end reason kind, not a transition matcher.
-   Cooldown rate-limits fires; it is not the re-arm mechanism.
+   Cooldown rate-limits fires; it is not the re-arm mechanism. A planned
+   timeout is not a condition edge: it is a scheduled, terminal wakeup — see
+   invariant 10.
 4. **Delivery is at-least-once.** A fire is logged to the sidecar before
    delivery; the `delivered` watermark lets a restart requeue fires that never
    reached the agent. Consumers must tolerate a duplicate wakeup.
@@ -62,3 +64,23 @@ either broken once or is one edit away from breaking.
    browser-trust fence, MIME/nosniff/cache rules and bodyless HEAD responses.
    Test initial HTML, actual assets and packed-package routes independently of
    the source checkout.
+10. **A timeout wakeup is a scheduled terminal fire, not a condition edge.**
+    A watch may carry one planned deadline (`timeoutAt`, tool argument
+    `timeout_seconds`). When it is reached before any condition fire, the
+    runtime logs one fire with `trigger.kind: "timeout"` and the fold retires
+    the watch **from that fired row** — never a fire-then-cancel pair, because
+    a `cancelled` change withdraws undelivered fires and a crash between the
+    two writes would lose the wakeup. That single-row retirement also makes
+    the wakeup at-most-once across restarts. Semantics:
+    - it fires only when `fireCount === 0`; a watch that already fired is
+      retired silently at its deadline (`cancelled`, reason `expired`);
+    - deadlines are scanned on the shared heartbeat, so they need no per-watch
+      timer and late-fire after downtime exactly like probe transitions;
+    - session and webhook watches are included (no probing required), and the
+      last probe state/snapshot rides along for diagnosis;
+    - silent `expiresAt` lifetime expiry remains a separate cap: expiry never
+      wakes the agent, `timeoutAt` always does. The tool rejects
+      `timeout_seconds >= expires_in_seconds`;
+    - the fire keeps the ordinary durable delivery path (`delivered`
+      watermark, boot requeue, external notify webhook) and the ordinary
+      message-source attribution.

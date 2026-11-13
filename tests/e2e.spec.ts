@@ -1254,4 +1254,317 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(received[0]?.['summary']).toContain('Snapshot changed')
     expect(received[0]?.['trigger']).toEqual({ kind: 'change' })
   }, 20_000)
+
+  /** POST one payload through a harness's webhook route; resolves with the HTTP status. */
+  async function pushHook(harness: ReturnType<typeof makeHarness>, payload: string, id = 'watch-1'): Promise<number> {
+    const hook = harness.routes.find(route => route.path === HOOK_PATH)
+    if (hook === undefined) throw new Error('hook route missing')
+    return await new Promise<number>(resolve => {
+      const dataListeners: Array<(chunk?: unknown) => void> = []
+      const endListeners: Array<() => void> = []
+      let status = 0
+      void hook.handler({
+        url: `${HOOK_PATH}?id=${id}&s=session-e2e`,
+        method: 'POST',
+        on(event: 'data' | 'end', callback: (chunk?: unknown) => void) {
+          if (event === 'data') dataListeners.push(callback)
+          else endListeners.push(callback as () => void)
+        },
+      }, {
+        writeHead(code: number) { status = code },
+        end() { resolve(status) },
+      })
+      for (const listener of dataListeners) listener(payload)
+      for (const listener of endListeners) listener()
+    })
+  }
+
+  function tool(harness: ReturnType<typeof makeHarness>, name: string): { execute: (args: unknown, exec: unknown) => Promise<unknown>; output: { render(args: unknown, value: unknown): Array<{ type: string; text?: string }> } } {
+    const found = harness.tools.find(candidate => candidate.name === name)
+    if (found === undefined) throw new Error(`${name} tool missing`)
+    return found
+  }
+
+  it('wakes the agent with a timeout when a watch never fires before its deadline', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+
+    const created = await watchTool.execute({
+      kind: 'command',
+      target: 'printf steady',
+      interval_seconds: 5,
+      note: 'stuck build: check progress and the watch target',
+      max_fires: 1,
+      timeout_seconds: 1,
+    }, {}) as { id: string; timeoutSeconds: number }
+    expect(created.timeoutSeconds).toBe(1)
+    const receipt = watchTool.output.render({}, created).map(block => block.text ?? '').join('')
+    expect(receipt).toContain('timeout wakeup fires if nothing triggers within 1s')
+
+    await expect.poll(() => harness.followups.length, { timeout: 5000 }).toBe(1)
+    const body = harness.followups[0] ?? ''
+    expect(body).toContain('[dsh-sentinel] Watch watch-1 timed out')
+    expect(body).toContain('stuck build: check progress and the watch target')
+    expect(body).toContain('sentinel TIMEOUT wakeup')
+    expect(body).toContain('Last observation')
+    expect(harness.sources[0]).toEqual({ kind: 'sentinel' })
+
+    // At most one terminal wakeup and the watch is retired from the active set.
+    await sleep(700)
+    expect(harness.followups.length).toBe(1)
+    const changes = await storeLines() as Array<{ change: { change: string; fact?: { trigger?: { kind?: string } } } }>
+    const fired = changes.filter(row => row.change.change === 'fired')
+    expect(fired).toHaveLength(1)
+    expect(fired[0]?.change.fact?.trigger?.kind).toBe('timeout')
+    const listed = await tool(harness, 'sentinel_list').execute({}, {}) as { subscriptions: unknown[] }
+    expect(listed.subscriptions).toHaveLength(0)
+    expect(changes.some(row => row.change.change === 'delivered')).toBe(true)
+  }, 15_000)
+
+  it('does not time out a watch that fired before its deadline', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+    await watchTool.execute({
+      kind: 'webhook', target: 'ci-pipeline', note: 'no timeout after a fire', max_fires: 1, timeout_seconds: 2,
+    }, {})
+    await sleep(100)
+    expect(await pushHook(harness, 'status=success')).toBe(200)
+    await expect.poll(() => harness.followups.length, { timeout: 3000 }).toBe(1)
+    expect(harness.followups[0]).toContain('Watch watch-1 fired')
+
+    // Deadline passes after the fire: the watch already ended, no timeout notice.
+    await sleep(2600)
+    expect(harness.followups.length).toBe(1)
+    const changes = await storeLines() as Array<{ change: { change: string } }>
+    expect(changes.filter(row => row.change.change === 'fired')).toHaveLength(1)
+  }, 15_000)
+
+  it('keeps expires_in_seconds a silent lifetime cap with no wakeup', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    await tool(harness, 'sentinel_watch').execute({
+      kind: 'command', target: 'printf quiet', interval_seconds: 5,
+      note: 'silent lifetime cap', max_fires: 3, expires_in_seconds: 1,
+    }, {})
+    await expect.poll(async () => {
+      const rows = await storeLines() as Array<{ change: { change: string } }>
+      return rows.filter(row => row.change.change === 'cancelled').length
+    }, { timeout: 5000 }).toBe(1)
+    const changes = await storeLines() as Array<{ change: { change: string; reason?: string } }>
+    expect(changes.find(row => row.change.change === 'cancelled')?.change.reason).toBe('expired')
+    expect(harness.followups.length).toBe(0)
+    const listed = await tool(harness, 'sentinel_list').execute({}, {}) as { subscriptions: unknown[] }
+    expect(listed.subscriptions).toHaveLength(0)
+  }, 15_000)
+
+  it('silently retires a repeat watch whose deadline passes after a fire', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+    await watchTool.execute({
+      kind: 'webhook', target: 'ci-pipeline', note: 'repeat watch retires at deadline',
+      max_fires: 3, cooldown_seconds: 0, timeout_seconds: 2,
+    }, {})
+    await sleep(100)
+    expect(await pushHook(harness, 'first')).toBe(200)
+    await expect.poll(() => harness.followups.length, { timeout: 3000 }).toBe(1)
+
+    // The "never fired" safety net must not double as a periodic debrief.
+    await sleep(2600)
+    expect(harness.followups.length).toBe(1)
+    const listed = await tool(harness, 'sentinel_list').execute({}, {}) as { subscriptions: unknown[] }
+    expect(listed.subscriptions).toHaveLength(0)
+    const changes = await storeLines() as Array<{ change: { change: string; reason?: string } }>
+    const cancelled = changes.filter(row => row.change.change === 'cancelled')
+    expect(cancelled).toHaveLength(1)
+    expect(cancelled[0]?.change.reason).toBe('expired')
+  }, 15_000)
+
+  it('times out a session watch that never observes a turn end', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+    await watchTool.execute({
+      kind: 'session', target: 'session-other', note: 'chain stalled: check the target session',
+      max_fires: 1, timeout_seconds: 1,
+    }, {})
+    await expect.poll(() => harness.followups.length, { timeout: 5000 }).toBe(1)
+    const body = harness.followups[0] ?? ''
+    expect(body).toContain('timed out')
+    expect(body).toContain('chain stalled: check the target session')
+    expect(body).toContain('awaiting turn end')
+  }, 15_000)
+
+  it('late-fires a timeout after a restart and wakes the dormant session', async () => {
+    await freshHome()
+    const first = makeHarness()
+    harnesses.push(first)
+    apply(first.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    first.emit('agent/created', { agent: first.agent })
+    await tool(first, 'sentinel_watch').execute({
+      kind: 'command', target: 'printf slow', interval_seconds: 5,
+      note: 'downtime deadline: the task outlived the daemon', max_fires: 1, timeout_seconds: 1,
+    }, {})
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) await cleanup()
+    // The deadline passes while no resident process is up: late-fire on boot.
+    await sleep(1200)
+
+    const second = makeHarness(['session-e2e'])
+    harnesses.push(second)
+    second.live.clear()
+    apply(second.rootCtx as never)
+    await expect.poll(() => second.followups.length, { timeout: 6000 }).toBe(1)
+    expect(second.resumeCalls).toEqual(['session-e2e'])
+    const body = second.followups[0] ?? ''
+    expect(body).toContain('timed out')
+    expect(body).toContain('downtime deadline: the task outlived the daemon')
+    const changes = await storeLines() as Array<{ change: { change: string } }>
+    expect(changes.filter(row => row.change.change === 'fired')).toHaveLength(1)
+  }, 20_000)
+
+  it('requeues a fired timeout wakeup after a crash before delivery', async () => {
+    await freshHome()
+    const first = makeHarness()
+    harnesses.push(first)
+    first.agent.status = 'busy'
+    apply(first.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    first.emit('agent/created', { agent: first.agent })
+    await tool(first, 'sentinel_watch').execute({
+      kind: 'command', target: 'printf idle', interval_seconds: 5,
+      note: 'crash window: timeout fire must survive', max_fires: 1, timeout_seconds: 1,
+    }, {})
+    await expect.poll(async () => (await storeLines()).some(row => row.change.change === 'fired'), { timeout: 5000 }).toBe(true)
+    expect(first.followups.length).toBe(0)
+    for (const cleanup of first.cleanups.splice(0, first.cleanups.length)) await cleanup()
+
+    // Boot requeues the undelivered fired row even though the watch was retired
+    // by the timeout itself (a fire-then-cancel design would have dropped it).
+    const second = makeHarness()
+    harnesses.push(second)
+    apply(second.rootCtx as never)
+    second.emit('agent/created', { agent: second.agent })
+    await expect.poll(() => second.followups.length, { timeout: 6000 }).toBe(1)
+    expect(second.followups[0]).toContain('timed out')
+    expect(second.followups[0]).toContain('crash window: timeout fire must survive')
+    await sleep(700)
+    expect(second.followups.length).toBe(1)
+  }, 20_000)
+
+  it('exposes the planned deadline in receipts, list rows, the state route and the dashboard', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+    const created = await watchTool.execute({
+      kind: 'process', target: 'definitely-not-running-proc', note: 'deadline surface', max_fires: 1, timeout_seconds: 120,
+    }, {}) as { id: string }
+    const receipt = watchTool.output.render({}, created).map(block => block.text ?? '').join('')
+    expect(receipt).toContain('timeout wakeup fires if nothing triggers within 120s')
+    const listedText = tool(harness, 'sentinel_list').output.render({}, await tool(harness, 'sentinel_list').execute({}, {})).map(block => block.text ?? '').join('')
+    expect(listedText).toContain('timeout at')
+
+    const stateRoute = harness.routes.find(route => route.path === STATE_PATH)
+    if (stateRoute === undefined) throw new Error('state route missing')
+    let stateBody = ''
+    await stateRoute.handler({ url: `${STATE_PATH}?sessionId=session-e2e` }, { writeHead() {}, end(body: string) { stateBody = body } })
+    const state = JSON.parse(stateBody) as { watches: Array<{ id: string; timeoutAt?: string }> }
+    expect(state.watches[0]?.id).toBe(created.id)
+    expect(Date.parse(state.watches[0]?.timeoutAt ?? '')).not.toBeNaN()
+
+    const dashboardRoute = harness.routes.find(route => route.path === DASHBOARD_PATH)
+    if (dashboardRoute === undefined) throw new Error('dashboard route missing')
+    let html = ''
+    await dashboardRoute.handler({ url: DASHBOARD_PATH }, { writeHead() {}, end(body: string) { html = body } })
+    expect(html).toContain('<th>Deadline</th>')
+    expect(html).toMatch(/<td>\d+s<\/td>/)
+  }, 15_000)
+
+  it('rejects invalid or contradictory timeout deadlines', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+    const base = { kind: 'file', target: '/tmp/never', note: 'invalid deadline' }
+    await expect(watchTool.execute({ ...base, timeout_seconds: 0 }, {})).rejects.toThrow('timeout_seconds must be a positive')
+    await expect(watchTool.execute({ ...base, timeout_seconds: -5 }, {})).rejects.toThrow('timeout_seconds must be a positive')
+    // The tool schema rejects non-JSON numbers before our normalizer runs.
+    await expect(watchTool.execute({ ...base, timeout_seconds: Number.NaN }, {})).rejects.toThrow(/timeout_seconds/)
+    await expect(watchTool.execute({
+      ...base, timeout_seconds: 60, expires_in_seconds: 30,
+    }, {})).rejects.toThrow('must be shorter than expires_in_seconds')
+    const listed = await tool(harness, 'sentinel_list').execute({}, {}) as { subscriptions: unknown[] }
+    expect(listed.subscriptions).toHaveLength(0)
+  }, 15_000)
+
+  it('fans a timeout fire out to the notify webhook with a timeout trigger', async () => {
+    await freshHome()
+    const received: Array<Record<string, unknown>> = []
+    const server = createHttpServer((req: IncomingMessage, res: ServerResponse) => {
+      let data = ''
+      req.on('data', (chunk: Buffer) => { data += chunk.toString() })
+      req.on('end', () => {
+        try { received.push(JSON.parse(data) as Record<string, unknown>) } catch { /* not for us */ }
+        res.writeHead(204)
+        res.end()
+      })
+    })
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', () => resolve()))
+    const { port } = server.address() as { port: number }
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100, notifyWebhookUrl: `http://127.0.0.1:${String(port)}/hook` })
+    harness.cleanups.push(() => new Promise<void>(resolve => server.close(() => resolve())))
+    harness.emit('agent/created', { agent: harness.agent })
+    await sleep(300)
+    await tool(harness, 'sentinel_watch').execute({
+      kind: 'command', target: 'printf quiet', interval_seconds: 5, note: 'notify timeout', max_fires: 1, timeout_seconds: 1,
+    }, {})
+    await expect.poll(() => received.length, { timeout: 6000 }).toBe(1)
+    expect(received[0]?.['event']).toBe('fired')
+    expect(received[0]?.['id']).toBe('watch-1')
+    expect(received[0]?.['trigger']).toEqual({ kind: 'timeout', deadline: expect.any(String) })
+    expect(received[0]?.['summary']).toContain('No condition fire before the planned deadline')
+    expect(typeof received[0]?.['timeoutAt']).toBe('string')
+  }, 20_000)
+
+  it('lets the duty owner fire and deliver a timeout created on a passive instance', async () => {
+    await freshHome()
+    const cfg = { ...DEFAULT_CONFIG, heartbeatMs: 200, dutyLeaseTtlMs: 2500 }
+    const owner = makeHarness()
+    harnesses.push(owner)
+    apply(owner.rootCtx as never, cfg)
+    await sleep(700)
+    const passive = makeHarness()
+    harnesses.push(passive)
+    apply(passive.rootCtx as never, cfg)
+    passive.emit('agent/created', { agent: passive.agent })
+    await sleep(400)
+    await tool(passive, 'sentinel_watch').execute({
+      kind: 'command', target: 'printf passive', interval_seconds: 5, note: 'passive timeout', max_fires: 1, timeout_seconds: 1,
+    }, {})
+    await expect.poll(() => owner.followups.length, { timeout: 6000 }).toBe(1)
+    expect(owner.followups[0]).toContain('timed out')
+    expect(passive.followups.length).toBe(0)
+  }, 20_000)
 })

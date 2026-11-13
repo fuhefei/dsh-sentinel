@@ -45,7 +45,7 @@ function baselineEvent(id: string, state: string, snapshot: string) {
   }
 }
 
-function firedEvent(id: string, at: string, observed?: { state: string; snapshot: string }) {
+function firedEvent(id: string, at: string, observed?: { state: string; snapshot: string }, trigger?: unknown) {
   return {
     type: SENTINEL_CHANGE_TYPE,
     payload: {
@@ -53,7 +53,7 @@ function firedEvent(id: string, at: string, observed?: { state: string; snapshot
       change: 'fired',
       id,
       at,
-      fact: { fireNumber: 1, summary: 's', before: '', after: 'a', probeMs: 3 },
+      fact: { fireNumber: 1, summary: 's', before: '', after: 'a', probeMs: 3, ...(trigger !== undefined ? { trigger } : {}) },
       ...(observed !== undefined ? { observed } : {}),
     },
   }
@@ -373,5 +373,135 @@ describe('clipExcerpt', () => {
     const clipped = clipExcerpt('x'.repeat(MAX_EXCERPT_LENGTH + 10))
     expect(clipped.length).toBeLessThan(MAX_EXCERPT_LENGTH + 40)
     expect(clipped).toContain('more chars')
+  })
+})
+
+describe('planned timeout deadline', () => {
+  const deadline = '2026-08-12T00:10:00.000Z'
+  const timeoutTrigger = { kind: 'timeout', deadline }
+
+  function compactedTimeout(timeoutAt: string) {
+    return {
+      type: SENTINEL_CHANGE_TYPE,
+      payload: {
+        version: SENTINEL_CHANGE_VERSION,
+        change: 'compacted',
+        subscription: {
+          id: 'watch-7',
+          spec: { kind: 'file', target: '/tmp/deploy.lock', intervalSeconds: 15 },
+          note: 'planned timeout survivor',
+          maxFires: 5,
+          cooldownSeconds: 60,
+          timeoutAt,
+          createdAt: '2026-08-12T00:00:00.000Z',
+          fireCount: 0,
+        },
+      },
+    }
+  }
+
+  it('folds a timeout deadline through created and compacted rows', () => {
+    const created = foldSentinelEvents([createdEvent('watch-1', { timeoutAt: deadline })])
+    expect(created.active.get('watch-1')?.timeoutAt).toBe(deadline)
+
+    const compacted = foldSentinelEvents([compactedTimeout(deadline)])
+    expect(compacted.active.get('watch-7')?.timeoutAt).toBe(deadline)
+
+    // Old rows without the field keep folding: timeout is opt-in.
+    const legacy = foldSentinelEvents([createdEvent('watch-2')])
+    expect(legacy.active.get('watch-2')?.timeoutAt).toBeUndefined()
+  })
+
+  it('rejects a present-but-unparseable timeoutAt in created and compacted rows', () => {
+    expect(() => foldSentinelEvents([createdEvent('watch-1', { timeoutAt: 'tomorrow' })])).toThrow(SentinelLogError)
+    expect(() => foldSentinelEvents([createdEvent('watch-1', { timeoutAt: 42 })])).toThrow(SentinelLogError)
+    expect(() => foldSentinelEvents([compactedTimeout('not-a-date')])).toThrow(SentinelLogError)
+  })
+
+  it('decodes a timeout fire trigger and rejects one without a parseable deadline', () => {
+    const legacy = firedEvent('watch-1', '2026-08-12T00:10:01.000Z', undefined, timeoutTrigger)
+    expect(decodeSentinelChange(legacy.payload)).toEqual(legacy.payload)
+    for (const bad of [
+      { kind: 'timeout' },
+      { kind: 'timeout', deadline: '' },
+      { kind: 'timeout', deadline: 'later' },
+    ]) {
+      expect(() => decodeSentinelChange(firedEvent('watch-1', '2026-08-12T00:10:01.000Z', undefined, bad).payload)).toThrow(SentinelLogError)
+    }
+  })
+
+  it('retires the watch when the timeout fire is folded, even with budget left', () => {
+    const folded = foldSentinelEvents([
+      createdEvent('watch-1', { maxFires: 3, timeoutAt: deadline }),
+      firedEvent('watch-1', '2026-08-12T00:10:01.000Z', undefined, timeoutTrigger),
+    ])
+    expect(folded.active.has('watch-1')).toBe(false)
+    // The fired row keeps its undelivered entry: boot requeue can still deliver it.
+    expect(folded.undeliveredFires).toHaveLength(1)
+    expect(folded.undeliveredFires[0]?.fact.trigger).toEqual(timeoutTrigger)
+
+    const delivered = foldSentinelEvents([
+      createdEvent('watch-1', { maxFires: 3, timeoutAt: deadline }),
+      firedEvent('watch-1', '2026-08-12T00:10:01.000Z', undefined, timeoutTrigger),
+      { type: SENTINEL_CHANGE_TYPE, payload: { version: SENTINEL_CHANGE_VERSION, change: 'delivered', at: '2026-08-12T00:10:02.000Z' } },
+    ])
+    expect(delivered.undeliveredFires).toHaveLength(0)
+    expect(delivered.active.size).toBe(0)
+  })
+
+  it('keeps a non-timeout fire armed inside the budget', () => {
+    const folded = foldSentinelEvents([
+      createdEvent('watch-1', { maxFires: 3, timeoutAt: deadline }),
+      firedEvent('watch-1', '2026-08-12T00:05:00.000Z'),
+    ])
+    expect(folded.active.get('watch-1')?.fireCount).toBe(1)
+    expect(folded.active.get('watch-1')?.timeoutAt).toBe(deadline)
+  })
+})
+
+describe('renderTimeoutWakeup', () => {
+  const sub: Subscription = {
+    id: 'watch-3',
+    spec: { kind: 'command', target: 'npm run build', pattern: 'BUILD OK', intervalSeconds: 30 },
+    note: '构建超时就先看日志再决定是否重跑',
+    maxFires: 2,
+    cooldownSeconds: 60,
+    timeoutAt: '2026-08-12T00:10:00.000Z',
+    createdAt: '2026-08-12T00:00:00.000Z',
+    fireCount: 0,
+  }
+  const fact = {
+    fireNumber: 1,
+    summary: 'No condition fire before the planned deadline',
+    trigger: { kind: 'timeout' as const, deadline: '2026-08-12T00:10:00.000Z' },
+    state: 'exit 1',
+    before: '',
+    after: 'stuck build output',
+    probeMs: 0,
+  }
+
+  it.each(['en', 'zh'] as const)('renders the deadline, last observation and timeout instruction in %s', locale => {
+    const body = renderWakeup(sub, fact, locale)
+    expect(body).toContain(locale === 'en' ? 'Watch watch-3 timed out' : '订阅 watch-3 超时未触发')
+    expect(body).toContain(sub.timeoutAt!)
+    expect(body).toContain(locale === 'en' ? '600s after registration' : '注册后 600s')
+    expect(body).toContain(locale === 'en' ? 'No condition fire before the planned deadline (state: exit 1)' : '计划截止时间前未触发（状态: 退出码 1）')
+    expect(body).toContain(fact.after)
+    expect(body).toContain(sub.note)
+    expect(body).toContain(locale === 'en' ? 'sentinel TIMEOUT wakeup' : '哨兵超时唤醒')
+    // Timeout is terminal: no fire-budget lines and no "re-register" instruction.
+    expect(body).not.toContain(locale === 'en' ? 'final fire' : '最后一次触发')
+    expect(body).not.toContain(locale === 'en' ? 'Remaining fires' : '剩余')
+    expect(body).not.toContain(locale === 'en' ? 'do not re-register' : '不要重新注册监控')
+  })
+
+  it('omits the last-observation block for push-only kinds without a snapshot', () => {
+    const body = renderWakeup(
+      { ...sub, spec: { kind: 'session', target: 'session-b', intervalSeconds: 30 } },
+      { ...fact, state: 'awaiting turn end', after: '' },
+      'en',
+    )
+    expect(body).toContain('awaiting turn end')
+    expect(body).not.toContain('Last observation:')
   })
 })
