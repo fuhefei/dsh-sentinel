@@ -9,7 +9,7 @@ import { apply, CANCEL_PATH, DASHBOARD_PATH, DEFAULT_CONFIG, HOOK_PATH, inject, 
 
 /** Minimal structural doubles for the host surfaces the plugin touches. */
 
-function makeHarness(resumable: string[] = [], options: { headless?: boolean; savedPreset?: string; reasoningEffort?: string } = {}) {
+function makeHarness(resumable: string[] = [], options: { headless?: boolean; savedPreset?: string; reasoningEffort?: string; legacyRoots?: boolean } = {}) {
   const followups: string[] = []
   // The wakeup's message-source attribution: 0.1.7 dropped the shared
   // `plugin` kind, so the contract we must hold is our own declared kind.
@@ -25,6 +25,8 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
   const resumeCalls: string[] = []
   const resumedOptions: Array<Record<string, unknown> | undefined> = []
   const mountedPresets: Array<string | undefined> = []
+  // Counts host `agents.roots()` probes: proves the legacy branch is exercised.
+  const rootsCalls = { count: 0 }
 
   function emit(event: string, ...args: unknown[]): void {
     for (const callback of listeners.get(event) ?? []) callback(...args)
@@ -53,10 +55,12 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
     }
   }
 
-  function buildAgent(id: string) {
+  function buildAgent(id: string, header?: { origin?: 'subagent'; parentSession?: string }) {
+    const session: { id: string; header?: { origin?: 'subagent'; parentSession?: string } } = { id }
+    if (header !== undefined) session.header = header
     return {
       id,
-      session: { id },
+      session,
       status: 'idle',
       followup(message: unknown) {
         const blocks = (message as { content?: Array<{ text?: string }> }).content ?? []
@@ -71,23 +75,32 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
   live.set(agent.id, agent)
 
   const routes: Array<{ path: string; handler: (req: unknown, res: unknown) => void }> = []
+  // DSH 0.2.2-rc.2 removed AgentRegistry.roots(); `legacyRoots: false` models
+  // that host. Both shapes classify roots the same way: live agents that are
+  // not explicit subagents (durable fork lineage does not matter).
+  const agents: Record<string, unknown> = {
+    get: (id: string) => live.get(id),
+    async resume({ resumeSessionId, agentOptions, setup }: { resumeSessionId: string; agentOptions?: Record<string, unknown>; setup?: (ctx: unknown, agent: unknown) => Promise<void> }) {
+      resumeCalls.push(resumeSessionId)
+      resumedOptions.push(agentOptions)
+      if (!resumable.includes(resumeSessionId)) throw new Error(`no persisted session "${resumeSessionId}"`)
+      const resumed = buildAgent(resumeSessionId)
+      await setup?.(resumed.ctx, resumed)
+      live.set(resumeSessionId, resumed)
+      emit('agent/created', { agent: resumed })
+      return { agent: resumed, dispose: () => { live.delete(resumeSessionId) } }
+    },
+  }
+  if (options.legacyRoots !== false) {
+    agents['roots'] = () => {
+      rootsCalls.count += 1
+      return [...live.values()].filter(candidate => candidate.session?.header?.origin !== 'subagent')
+    }
+  }
   const rootCtx: Record<string, unknown> = {
     ...makeCtx(),
     agentDefaultModel: { currentSelection: () => ({ provider: 'deepseek', model: 'deepseek-chat', ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: options.reasoningEffort }) }) },
-    agents: {
-      roots: () => [...live.values()],
-      get: (id: string) => live.get(id),
-      async resume({ resumeSessionId, agentOptions, setup }: { resumeSessionId: string; agentOptions?: Record<string, unknown>; setup?: (ctx: unknown, agent: unknown) => Promise<void> }) {
-        resumeCalls.push(resumeSessionId)
-        resumedOptions.push(agentOptions)
-        if (!resumable.includes(resumeSessionId)) throw new Error(`no persisted session "${resumeSessionId}"`)
-        const resumed = buildAgent(resumeSessionId)
-        await setup?.(resumed.ctx, resumed)
-        live.set(resumeSessionId, resumed)
-        emit('agent/created', { agent: resumed })
-        return { agent: resumed, dispose: () => { live.delete(resumeSessionId) } }
-      },
-    },
+    agents,
   }
   const services: Record<string, unknown> = options.savedPreset === undefined ? {} : {
     agentPresets: { mount: async (_ctx: unknown, presetId?: string) => { mountedPresets.push(presetId ?? 'current-default') } },
@@ -114,7 +127,7 @@ function makeHarness(resumable: string[] = [], options: { headless?: boolean; sa
     return () => {}
   }
 
-  return { agent, followups, sources, tools, routes, cleanups, rootCtx, live, resumeCalls, resumedOptions, mountedPresets, emit }
+  return { agent, followups, sources, tools, routes, cleanups, rootCtx, live, resumeCalls, resumedOptions, mountedPresets, emit, buildAgent, rootsCalls }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -302,6 +315,94 @@ describe('sentinel end-to-end (in-process)', () => {
       expect(harness.resumedOptions[0]).toEqual({ provider: 'deepseek', model: 'deepseek-chat', reasoningEffort: 'high' })
       if (field === 'preset-free composition') expect(harness.mountedPresets).toEqual([])
     }
+  })
+
+  it('attaches to a root agent and skips subagents on a DSH 0.2.2-rc.2 host without agents.roots()', async () => {
+    await freshHome()
+    // `legacyRoots: false` is the 0.2.2-rc.2 registry shape: get() exists, roots() is gone.
+    const harness = makeHarness([], { legacyRoots: false, headless: true })
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+
+    // Root on 0.2.2-rc.2: the exact live registry entry, session.header.origin undefined.
+    const root = harness.buildAgent('session-root', {})
+    harness.live.set(root.id, root)
+    harness.emit('agent/created', { agent: root })
+    expect(harness.rootsCalls.count).toBe(0)
+    const names = harness.tools.map(tool => tool.name)
+    expect(names).toContain('sentinel_watch')
+    expect(names).toContain('sentinel_list')
+    expect(names).toContain('sentinel_cancel')
+
+    // The fallback path must be functional, not just non-throwing.
+    const watchTool = harness.tools.find(tool => tool.name === 'sentinel_watch')
+    if (watchTool === undefined) throw new Error('watch tool missing')
+    const created = await watchTool.execute({ kind: 'process', target: 'definitely-not-running-proc', note: '0.2.2-rc.2 host smoke', max_fires: 1 }, {}) as { id: string }
+    expect(created.id).toBe('watch-1')
+    const listTool = harness.tools.find(tool => tool.name === 'sentinel_list')
+    if (listTool === undefined) throw new Error('list tool missing')
+    const listed = await listTool.execute({}, {}) as { subscriptions: Array<{ id: string }> }
+    expect(listed.subscriptions.map(sub => sub.id)).toContain('watch-1')
+
+    // A delegated child (explicit origin "subagent") is live but not a root.
+    const subagent = harness.buildAgent('session-subagent', { origin: 'subagent' })
+    harness.live.set(subagent.id, subagent)
+    const beforeSubagent = harness.tools.length
+    harness.emit('agent/created', { agent: subagent })
+    expect(harness.tools.length).toBe(beforeSubagent)
+
+    // Durable lineage does not decide root-ness: an ordinary fork keeps
+    // parentSession but is still a root; only subagent origin excludes it.
+    const fork = harness.buildAgent('session-fork', { parentSession: 'session-root' })
+    harness.live.set(fork.id, fork)
+    const beforeFork = harness.tools.length
+    harness.emit('agent/created', { agent: fork })
+    const forkTools = harness.tools.slice(beforeFork).map(tool => tool.name)
+    expect(forkTools).toContain('sentinel_watch')
+
+    // Stale/non-live entries are not attached (exact live-instance identity).
+    const ghost = harness.buildAgent('session-ghost', {})
+    const beforeGhost = harness.tools.length
+    harness.emit('agent/created', { agent: ghost })
+    expect(harness.tools.length).toBe(beforeGhost)
+  })
+
+  it('keeps the agents.roots() classification on hosts that still expose it', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    expect(harness.rootsCalls.count).toBeGreaterThan(0)
+    expect(harness.tools.map(tool => tool.name)).toContain('sentinel_watch')
+
+    // Legacy semantics preserved: a live subagent is not in roots(), so it never attaches.
+    const subagent = harness.buildAgent('session-subagent', { origin: 'subagent' })
+    harness.live.set(subagent.id, subagent)
+    const before = harness.tools.length
+    harness.emit('agent/created', { agent: subagent })
+    expect(harness.tools.length).toBe(before)
+  })
+
+  it('never turns a drifted host-API shape into an agent/created session-creation failure', async () => {
+    await freshHome()
+    const harness = makeHarness([], { legacyRoots: false, headless: true })
+    harnesses.push(harness)
+    const warnings: string[] = []
+    harness.rootCtx['logger'] = { warn: (message: string) => { warnings.push(message) } }
+    // Future drift: neither roots() nor get() can establish root-ness.
+    delete (harness.rootCtx['agents'] as Record<string, unknown>)['get']
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+
+    expect(() => harness.emit('agent/created', { agent: harness.agent })).not.toThrow()
+    expect(harness.tools.length).toBe(0)
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('cannot verify root agents')
+
+    // A malformed payload is inert too, and the warning does not repeat.
+    expect(() => harness.emit('agent/created', {})).not.toThrow()
+    expect(() => harness.emit('agent/created', { agent: harness.agent })).not.toThrow()
+    expect(warnings).toHaveLength(1)
   })
 
   it('registers the tools, records sidecar changes, probes, and wakes the agent', async () => {

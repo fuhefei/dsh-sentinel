@@ -172,6 +172,14 @@ interface AgentLike {
   readonly status: string
   followup(message: unknown): void
   readonly ctx: ContextLike
+  /** Optional because root classification reads it: DSH 0.2.2-rc.2 dropped
+   * `agents.roots()` and the replacement probes the session header origin. */
+  readonly session?: {
+    readonly header?: {
+      /** Explicit delegated-child marker; ordinary sessions leave it undefined. */
+      readonly origin?: unknown
+    }
+  }
 }
 
 interface ContextLike {
@@ -183,7 +191,8 @@ interface ContextLike {
   get?: Context['get']
   readonly logger: { warn(message: string): void }
   readonly agents: {
-    roots(): AgentLike[]
+    /** Present through DSH 0.2.2-rc.1; 0.2.2-rc.2 and later removed it. */
+    roots?(): AgentLike[]
     get(id: string): AgentLike | undefined
     resume(options: ResumeAgentOptions): Promise<{ agent: AgentLike; dispose(): void | Promise<void> }>
   }
@@ -207,6 +216,56 @@ interface ContextLike {
         end(body: string): void
       }) => void | Promise<void>
     }): () => void
+  }
+}
+
+/** Host contexts already warned about an unresolvable host-API probe. */
+const warnedContexts = new WeakSet<object>()
+
+/** Emit one diagnostic per host context; never let diagnostics throw. */
+function warnOnce(ctx: ContextLike, message: string): void {
+  const key: object = ctx
+  if (warnedContexts.has(key)) return
+  warnedContexts.add(key)
+  try {
+    ctx.logger.warn(`${PLUGIN_ID}: ${message}`)
+  } catch {
+    // Diagnostics must never turn into a session-creation failure.
+  }
+}
+
+/**
+ * Whether a freshly created agent is a runtime root — the top-level session a
+ * sentinel channel may attach to.
+ *
+ * DSH through 0.2.2-rc.1 exposes `agents.roots()`; 0.2.2-rc.2 removed it. The
+ * authoritative replacement (dsh-user-questions `assertLiveRoot`, dsh-tool-goal)
+ * classifies as a root the exact live registry entry whose session header
+ * origin is not the explicit `subagent` marker. Durable lineage does not
+ * matter: an ordinary resumed fork may keep `parentSession` and is still a
+ * root, while Agent-Teams teammates are created with origin "subagent".
+ *
+ * This runs inside serial `agent/created` dispatch, where a throw aborts
+ * session creation (issue #20), so every optional host access is
+ * feature-detected and guarded. When root-ness cannot be established, warn
+ * once and leave the agent unattached: an inert listener is safe, a throw is not.
+ */
+function isRootAgent(ctx: ContextLike, agent: AgentLike): boolean {
+  try {
+    const agents: ContextLike['agents'] | undefined = ctx.agents
+    if (agents === undefined || agents === null) {
+      warnOnce(ctx, 'cannot verify root agents: the host exposes no agents registry; not attaching the created agent')
+      return false
+    }
+    if (typeof agents.roots === 'function') return agents.roots().includes(agent)
+    if (typeof agents.get !== 'function') {
+      warnOnce(ctx, 'cannot verify root agents: agents.roots() is gone and agents.get() is missing; not attaching the created agent')
+      return false
+    }
+    return agents.get(agent.id) === agent && agent.session?.header?.origin !== 'subagent'
+  } catch (error) {
+    warnOnce(ctx, `root-agent detection failed (${describe(error)}); not attaching the created agent`)
+    return false
   }
 }
 
@@ -1593,21 +1652,28 @@ export function apply(ctx: ContextLike, config: Config = DEFAULT_CONFIG): void {
 
     const attached = new WeakSet<AgentLike>()
     const stopCreated = ctx.on('agent/created', (...args: never[]) => {
-      const { agent } = (args[0] as unknown as { agent: AgentLike })
-      if (stopping || attached.has(agent) || !ctx.agents.roots().includes(agent)) return
-      attached.add(agent)
-      const watch = runtime.watchOf(agent.id)
-      agent.ctx.effect(() => {
-        const disposers = registerSentinelTools(runtime, agent.ctx, agent)
-        const stopStatus = agent.ctx.on('agent/status', (...statusArgs: never[]) => {
-          const { status } = (statusArgs[0] as unknown as { status: string })
-          if (status === 'idle') runtime.flushWakeups(watch)
-        })
-        return () => {
-          stopStatus()
-          for (const dispose of disposers) dispose()
-        }
-      }, `${PLUGIN_ID}.channel()`)
+      try {
+        const created = args[0] as unknown as { agent?: AgentLike } | undefined
+        const agent = created?.agent
+        if (stopping || agent === undefined || agent === null || attached.has(agent) || !isRootAgent(ctx, agent)) return
+        attached.add(agent)
+        const watch = runtime.watchOf(agent.id)
+        agent.ctx.effect(() => {
+          const disposers = registerSentinelTools(runtime, agent.ctx, agent)
+          const stopStatus = agent.ctx.on('agent/status', (...statusArgs: never[]) => {
+            const { status } = (statusArgs[0] as unknown as { status: string })
+            if (status === 'idle') runtime.flushWakeups(watch)
+          })
+          return () => {
+            stopStatus()
+            for (const dispose of disposers) dispose()
+          }
+        }, `${PLUGIN_ID}.channel()`)
+      } catch (error) {
+        // Serial `agent/created` dispatch aborts the host's session creation
+        // when a listener throws — never let host-API drift do that.
+        warnOnce(ctx, `agent/created handling failed (${describe(error)}); leaving the created agent unattached`)
+      }
     })
 
     // Root-scope `session/event` feed: the host dispatches every published
