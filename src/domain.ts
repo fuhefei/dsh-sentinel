@@ -48,8 +48,14 @@ export interface Subscription {
   readonly maxFires: number
   /** Seconds to stay silent after a fire. */
   readonly cooldownSeconds: number
-  /** RFC 3339 expiry; undefined = lives until cancelled. */
+  /** RFC 3339 expiry; undefined = lives until cancelled. The TTL cancel is silent (no wakeup). */
   readonly expiresAt?: string
+  /**
+   * RFC 3339 planned deadline. When it is reached before any condition fire,
+   * the runtime fires one timeout wakeup and the fold retires the watch from
+   * that fired row. Silent `expiresAt` remains a separate lifetime cap.
+   */
+  readonly timeoutAt?: string
   /** RFC 3339 creation instant. */
   readonly createdAt: string
   /** Fires recorded so far (folded). */
@@ -72,6 +78,7 @@ export type SentinelChange =
       readonly maxFires: number
       readonly cooldownSeconds: number
       readonly expiresAt?: string
+      readonly timeoutAt?: string
       readonly createdAt: string
     }
   }
@@ -123,6 +130,7 @@ export type SentinelChange =
       readonly maxFires: number
       readonly cooldownSeconds: number
       readonly expiresAt?: string
+      readonly timeoutAt?: string
       readonly createdAt: string
       readonly fireCount: number
       readonly lastFiredAt?: string
@@ -155,6 +163,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/**
+ * Decode an optional absolute timestamp. Missing stays missing; a present value
+ * must be a parseable RFC 3339 string — a deadline that silently never reaches
+ * the heartbeat scan would be a misconfiguration, not a persisted state.
+ */
+function decodeTimestamp(value: unknown, field: string): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || Number.isNaN(Date.parse(value))) {
+    throw new SentinelLogError(`${field} must be a parseable RFC 3339 string when present`)
+  }
+  return value
+}
+
 /** Validate a persisted probe observation ({@link KnownSnapshot}). */
 function decodeObserved(value: unknown): KnownSnapshot {
   if (!isRecord(value) || typeof value['state'] !== 'string' || typeof value['snapshot'] !== 'string') {
@@ -169,6 +190,9 @@ export const MIN_INTERVAL_SECONDS = 5
 export const MAX_INTERVAL_SECONDS = 86_400
 export const DEFAULT_INTERVAL_SECONDS = 30
 export const DEFAULT_COOLDOWN_SECONDS = 60
+/** Bounds for a planned timeout deadline (seconds); the tool validates and clamps into this range. */
+export const MIN_TIMEOUT_SECONDS = 1
+export const MAX_TIMEOUT_SECONDS = 2_592_000
 export const MAX_SUBSCRIPTIONS_PER_AGENT = 16
 export const MAX_NOTE_LENGTH = 2000
 export const MAX_EXCERPT_LENGTH = 640
@@ -242,6 +266,7 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     if (expiresAt !== undefined && typeof expiresAt !== 'string') {
       throw new SentinelLogError('expiresAt must be a string when present')
     }
+    const timeoutAt = decodeTimestamp(sub['timeoutAt'], 'timeoutAt')
     return {
       version: SENTINEL_CHANGE_VERSION,
       change: 'created',
@@ -252,6 +277,7 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
         maxFires,
         cooldownSeconds: cooldown,
         ...(expiresAt !== undefined ? { expiresAt } : {}),
+        ...(timeoutAt !== undefined ? { timeoutAt } : {}),
         createdAt,
       },
     }
@@ -301,8 +327,11 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
           throw new SentinelLogError('session fire trigger needs a non-negative integer turn')
         }
         trigger = { kind: 'session', sessionId: rawTrigger['sessionId'], turn, reason: rawTrigger['reason'] }
+      } else if (isRecord(rawTrigger) && rawTrigger['kind'] === 'timeout'
+        && typeof rawTrigger['deadline'] === 'string' && !Number.isNaN(Date.parse(rawTrigger['deadline']))) {
+        trigger = { kind: 'timeout', deadline: rawTrigger['deadline'] }
       } else {
-        throw new SentinelLogError('fire trigger must be change, webhook, session, or pattern with string pattern and match')
+        throw new SentinelLogError('fire trigger must be change, webhook, session, timeout with an RFC 3339 deadline, or pattern with string pattern and match')
       }
     }
     const state = fact['state']
@@ -364,6 +393,7 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
     if (expiresAt !== undefined && typeof expiresAt !== 'string') {
       throw new SentinelLogError('expiresAt must be a string when present')
     }
+    const timeoutAt = decodeTimestamp(sub['timeoutAt'], 'timeoutAt')
     const lastFiredAt = sub['lastFiredAt']
     if (lastFiredAt !== undefined && typeof lastFiredAt !== 'string') {
       throw new SentinelLogError('lastFiredAt must be a string when present')
@@ -379,6 +409,7 @@ export function decodeSentinelChange(value: unknown): SentinelChange {
         maxFires,
         cooldownSeconds: cooldown,
         ...(expiresAt !== undefined ? { expiresAt } : {}),
+        ...(timeoutAt !== undefined ? { timeoutAt } : {}),
         createdAt,
         fireCount,
         ...(lastFiredAt !== undefined ? { lastFiredAt } : {}),
@@ -460,6 +491,15 @@ export function foldSentinelEvents(events: Iterable<SentinelEventRow>): FoldedSe
         ...(change.observed !== undefined ? { lastKnown: change.observed } : {}),
       }
       undelivered.push({ id: change.id, at: change.at, sub: fired, fact: change.fact })
+      // A timeout fire is terminal by definition: the planned-deadline wakeup
+      // retires the watch inside the fold instead of writing a cancel row, so
+      // the fired row keeps its undelivered entry for the boot requeue while a
+      // crash can neither lose nor duplicate the wakeup. (A cancel row would
+      // withdraw that entry — see the cancelled branch below.)
+      if (change.fact.trigger?.kind === 'timeout') {
+        active.delete(change.id)
+        continue
+      }
       if (fired.fireCount >= fired.maxFires) active.delete(change.id)
       else active.set(change.id, fired)
       continue
@@ -489,11 +529,41 @@ export function clipExcerpt(text: string): string {
   return `${text.slice(0, MAX_EXCERPT_LENGTH)}… (${String(text.length - MAX_EXCERPT_LENGTH)} more chars)`
 }
 
+/** Seconds between registration and the planned deadline, clamped for display. */
+function timeoutElapsedSeconds(sub: Subscription): number {
+  const deadline = sub.timeoutAt === undefined ? Number.NaN : Date.parse(sub.timeoutAt)
+  const created = Date.parse(sub.createdAt)
+  if (!Number.isFinite(deadline) || !Number.isFinite(created)) return 0
+  return Math.max(0, Math.round((deadline - created) / 1000))
+}
+
+/**
+ * Timeout wakeup body: this is not a condition transition, so budget lines are
+ * replaced by the planned deadline, the last observation and a check-progress /
+ * fix-the-watch instruction. Caller data stays verbatim.
+ */
+function renderTimeoutWakeup(sub: Subscription, fact: FireFact, deadline: string, locale: Locale): string {
+  const lines = [
+    translate(locale, 'wakeupTimeoutTitle', { id: sub.id }),
+    translate(locale, 'wakeupTarget', { kind: sub.spec.kind, target: sub.spec.target }),
+    sub.spec.pattern !== undefined ? translate(locale, 'wakeupPattern', { pattern: sub.spec.pattern }) : undefined,
+    translate(locale, 'wakeupTimeoutDeadline', { deadline, elapsed: timeoutElapsedSeconds(sub) }),
+    translate(locale, 'wakeupChange', { summary: formatFireSummary(fact, locale) }),
+    fact.after !== '' ? translate(locale, 'wakeupTimeoutLast', { last: fact.after }) : undefined,
+    '',
+    translate(locale, 'wakeupNote', { note: sub.note }),
+    '',
+    translate(locale, 'wakeupTimeoutInstruction'),
+  ]
+  return lines.filter((line): line is string => line !== undefined).join('\n')
+}
+
 /**
  * Render the wakeup message body: receipt, note, fact, history — everything
  * future-self needs without re-probing.
  */
 export function renderWakeup(sub: Subscription, fact: FireFact, locale: Locale = 'en'): string {
+  if (fact.trigger?.kind === 'timeout') return renderTimeoutWakeup(sub, fact, fact.trigger.deadline, locale)
   const lines = [
     translate(locale, 'wakeupTitle', { id: sub.id, count: fact.fireNumber, max: sub.maxFires }),
     translate(locale, 'wakeupTarget', { kind: sub.spec.kind, target: sub.spec.target }),

@@ -39,6 +39,8 @@ export type FireTrigger =
   | { readonly kind: 'pattern'; readonly pattern: string; readonly match: string }
   | { readonly kind: 'session'; readonly sessionId: string; readonly turn: number; readonly reason: string }
   | { readonly kind: 'webhook' }
+  /** Planned-deadline wakeup: no condition fire arrived before `deadline` (RFC 3339) and the watch was retired. */
+  | { readonly kind: 'timeout'; readonly deadline: string }
 
 export interface FireMessage {
   readonly summary: string
@@ -83,16 +85,23 @@ const en = {
   noWatches: 'No active sentinel watches.',
   notProbed: 'not probed',
   listRow: '{id}: {kind} · {target} [{state}] fired {count}/{max}',
+  listRowTimeout: '{id}: {kind} · {target} [{state}] fired {count}/{max} · timeout at {timeout}',
   cancelled: 'Watch {id} cancelled.',
   notFound: 'No active watch named {id}.',
+  timeoutSummary: 'No condition fire before the planned deadline',
+  timeoutArmed: ' · a timeout wakeup fires if nothing triggers within {seconds}s',
   wakeupTitle: '[dsh-sentinel] Watch {id} fired ({count}/{max})',
+  wakeupTimeoutTitle: '[dsh-sentinel] Watch {id} timed out',
   wakeupTarget: 'Watching: {kind} · {target}',
   wakeupPattern: 'Pattern: /{pattern}/',
+  wakeupTimeoutDeadline: 'Planned deadline: {deadline} ({elapsed}s after registration); nothing fired before it.',
   wakeupChange: 'Change: {summary}',
   wakeupBefore: 'Before:\n{before}',
   wakeupAfter: 'Now:\n{after}',
+  wakeupTimeoutLast: 'Last observation:\n{last}',
   wakeupNote: 'The note you left when registering:\n{note}',
   wakeupInstruction: 'This is a sentinel condition wakeup: handle this fire according to the note, then stop. Unless the user or note asks, do not re-register the watch or start unrelated investigations.',
+  wakeupTimeoutInstruction: 'This is a sentinel TIMEOUT wakeup: the watch never fired before its planned deadline and has been retired. Check whether the watched task is still running or making progress, and whether the watch was configured correctly (target, pattern, interval). Then tell the user what you found, or register a corrected watch with a new timeout. This wakeup is terminal: no further fire will arrive from this watch.',
   wakeupLast: 'This was the final fire; the watch has ended automatically.',
   wakeupRemaining: 'Remaining fires: {remaining}; if no longer needed, cancel with sentinel_cancel (id: "{id}").',
 } as const
@@ -134,16 +143,23 @@ const zh: Record<keyof typeof en, string> = {
   noWatches: '没有活跃的哨兵订阅。',
   notProbed: '未探测',
   listRow: '{id}: {kind} · {target} [{state}] 触发 {count}/{max}',
+  listRowTimeout: '{id}: {kind} · {target} [{state}] 触发 {count}/{max} · 超时时间 {timeout}',
   cancelled: '订阅 {id} 已取消。',
   notFound: '没有名为 {id} 的活跃订阅。',
+  timeoutSummary: '计划截止时间前未触发',
+  timeoutArmed: ' · {seconds}s 内无触发则触发一次超时唤醒',
   wakeupTitle: '[dsh-sentinel] 订阅 {id} 触发（第 {count}/{max} 次）',
+  wakeupTimeoutTitle: '[dsh-sentinel] 订阅 {id} 超时未触发',
   wakeupTarget: '监控对象: {kind} · {target}',
   wakeupPattern: '匹配模式: /{pattern}/',
+  wakeupTimeoutDeadline: '计划截止时间: {deadline}（注册后 {elapsed}s）；届时仍未触发。',
   wakeupChange: '变化: {summary}',
   wakeupBefore: '之前:\n{before}',
   wakeupAfter: '现在:\n{after}',
+  wakeupTimeoutLast: '最后一次观测:\n{last}',
   wakeupNote: '你注册时留给自己的便签:\n{note}',
   wakeupInstruction: '以上是哨兵条件唤醒：按便签处理完本次触发即停；除非用户或便签要求，不要重新注册监控、不要展开无关调查。',
+  wakeupTimeoutInstruction: '以上是哨兵超时唤醒：该监控在计划截止时间前始终没有触发，现已自动注销。请检查被监控的任务是否仍在运行/推进，以及监控配置（target、pattern、interval）是否正确；然后把情况告知用户，或重新注册一个修正后的监控（可带新的超时）。本次唤醒之后不会再有该监控的触发。',
   wakeupLast: '这是最后一次触发，该订阅已自动结束。',
   wakeupRemaining: '剩余 {remaining} 次触发额度；如果不再需要，用 sentinel_cancel 工具取消（id: "{id}"）。',
 }
@@ -232,11 +248,12 @@ export function createPresentation(locale: Locale, dictionary: Readonly<Record<M
     if (trigger === undefined) return fact.summary
     const summary = trigger.kind === 'change' ? translate('snapshotChanged')
       : trigger.kind === 'webhook' ? translate('webhookReceived')
-        : trigger.kind === 'session'
-          ? (trigger.turn > 0
-            ? translate('sessionTurnEnded', { session: trigger.sessionId, turn: trigger.turn, reason: reasonLabel(trigger.reason) })
-            : translate('sessionTurnEndedNoTurn', { session: trigger.sessionId, reason: reasonLabel(trigger.reason) }))
-          : translate('patternMatched', { pattern: trigger.pattern, match: trigger.match })
+        : trigger.kind === 'timeout' ? translate('timeoutSummary')
+          : trigger.kind === 'session'
+            ? (trigger.turn > 0
+              ? translate('sessionTurnEnded', { session: trigger.sessionId, turn: trigger.turn, reason: reasonLabel(trigger.reason) })
+              : translate('sessionTurnEndedNoTurn', { session: trigger.sessionId, reason: reasonLabel(trigger.reason) }))
+            : translate('patternMatched', { pattern: trigger.pattern, match: trigger.match })
     return message.state === undefined ? summary
       : translate('withState', { summary, state: localizeState(message.state) })
   }
