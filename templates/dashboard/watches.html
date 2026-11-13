@@ -8,9 +8,10 @@
   <td>{{fireCount}}/{{maxFires}}{{#pending}} <small class="pending">{{label}}</small>{{/pending}}</td>
   <td>{{state}}</td>
   <td>{{next}}</td>
+  <td>{{deadline}}</td>
   <td><button type="button" class="cancel" data-session="{{sessionId}}" data-id="{{id}}" title="{{cancel}}" aria-label="{{cancel}} {{id}}">×</button></td>
 </tr>
 {{/watches}}
 {{^watches}}
-<tr><td colspan="9" class="empty">{{emptyWatches}}</td></tr>
+<tr><td colspan="10" class="empty">{{emptyWatches}}</td></tr>
 {{/watches}}

@@ -91,6 +91,8 @@ const zh = {
   'cancel': '取消这个监控',
   'pending': '{n} 个唤醒待投递',
   'turnEnd': '回合结束时',
+  'timeoutIn': '超时 {s}s',
+  'timedOut': '已超时',
 } satisfies Record<string, string>
 type SentinelKey = keyof typeof zh
 const en = {
@@ -116,6 +118,8 @@ const en = {
   'cancel': 'Cancel this watch',
   'pending': '{n} wakeup(s) pending',
   'turnEnd': 'on turn end',
+  'timeoutIn': 'timeout in {s}s',
+  'timedOut': 'timed out',
 } satisfies Record<string, string>
 
 const SIDE_CLEARANCE = 'var(--dsh-composer-side-clearance, 16px)'
@@ -133,6 +137,7 @@ interface WireWatch {
   note: string
   fireCount: number
   maxFires: number
+  timeoutAt?: string
   lastState?: string
   lastProbeAt?: number
   nextDueAt?: number
@@ -284,6 +289,15 @@ function pendingSuffix(watch: WireWatch, t: (key: SentinelKey, values?: Record<s
     : ''
 }
 
+/** Planned-deadline countdown for a timeout-armed watch; recomputed on each poll render. */
+function timeoutSuffix(watch: WireWatch, t: (key: SentinelKey, values?: Record<string, unknown>) => string): string {
+  if (watch.timeoutAt === undefined) return ''
+  const deadline = Date.parse(watch.timeoutAt)
+  if (!Number.isFinite(deadline)) return ''
+  const remaining = Math.ceil((deadline - Date.now()) / 1000)
+  return ` · ${remaining <= 0 ? t('timedOut') : t('timeoutIn', { s: remaining })}`
+}
+
 function CancelButton(props: { watch: WireWatch; t: (key: SentinelKey) => string }): ReactNode {
   const { watch, t } = props
   return (
@@ -321,7 +335,7 @@ function WatchRow(props: { watch: WireWatch; t: (key: SentinelKey, values?: Reco
         {watch.target}
       </span>
       <span style={{ flex: 'none', fontSize: 12, color: 'var(--dsw-alias-label-caption)', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}>
-        {watch.lastState === undefined ? t('probing') : localizeState(watch.lastState, locale)} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)} · {cadence}
+        {watch.lastState === undefined ? t('probing') : localizeState(watch.lastState, locale)} · {t('fires', { n: watch.fireCount, max: watch.maxFires })}{pendingSuffix(watch, t)} · {cadence}{timeoutSuffix(watch, t)}
       </span>
       <CancelButton watch={watch} t={t} />
     </div>

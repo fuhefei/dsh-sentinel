@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Sentinel",
-    "description": "Condition-driven wakeups: file, process, port, command, HTTP, session turn-end and webhook sensors wake the agent when something happens."
+    "description": "Condition-driven wakeups: file, process, port, command, HTTP, session turn-end and webhook sensors wake the agent when something happens — plus planned-deadline timeout wakeups when nothing does."
   }
 }

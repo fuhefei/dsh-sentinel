@@ -6,7 +6,7 @@ import fireRowsTemplate from '../templates/dashboard/fires.html?raw'
 
 const en = {
   title: 'Sentinel overview', watchesTitle: 'Active watches',
-  heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe', ''],
+  heads: ['Session', 'Watch', 'Sensor', 'Target', 'Pattern', 'Fires', 'Last state', 'Next probe', 'Deadline', ''],
   fireHeads: ['Time', 'Watch', 'Session', 'Summary'],
   empty: 'No active watches right now.', firesTitle: 'Recent fires', firesEmpty: 'No fires yet.',
   live: 'live', dormant: 'dormant', probing: 'probing', push: 'live push', turnEnd: 'on turn end',
@@ -16,7 +16,7 @@ const en = {
 }
 const zh: typeof en = {
   title: 'Sentinel 全局总览', watchesTitle: '活跃监控',
-  heads: ['会话', '监控', '传感器', '目标', '模式', '触发', '最近状态', '下次探测', ''],
+  heads: ['会话', '监控', '传感器', '目标', '模式', '触发', '最近状态', '下次探测', '截止', ''],
   fireHeads: ['时间', '监控', '会话', '摘要'],
   empty: '当前没有活跃的监控。', firesTitle: '最近触发', firesEmpty: '尚未触发过。',
   live: '活跃', dormant: '休眠', probing: '探测中', push: '即时推送', turnEnd: '回合结束时',
@@ -48,6 +48,12 @@ export function createDashboardRenderer(locale: Locale) {
     .toLocaleTimeString(locale === 'zh' ? 'zh-CN' : 'en')
   const badge = (kind: 'pending' | 'dropped', count: number) => count > 0
     ? { label: fill(copy[kind], { n: count }) } : null
+  /** Planned-deadline countdown; the browser rerenders this model every poll. */
+  const deadline = (timeoutAt?: string): string => {
+    if (timeoutAt === undefined) return '—'
+    const parsed = Date.parse(timeoutAt)
+    return Number.isFinite(parsed) ? `${String(Math.max(0, Math.ceil((parsed - Date.now()) / 1000)))}s` : '—'
+  }
   const watchModel = (watches: readonly WatchRow[], dropped: Readonly<Record<string, number>> = {}) => ({
     watches: watches.map(row => ({
       session: row.sessionId.slice(0, 16), sessionId: row.sessionId,
@@ -58,6 +64,7 @@ export function createDashboardRenderer(locale: Locale) {
       next: row.kind === 'webhook' ? copy.push
         : row.kind === 'session' ? copy.turnEnd
           : row.nextDueAt !== undefined ? `${String(Math.max(0, Math.ceil((row.nextDueAt - Date.now()) / 1000)))}s` : '…',
+      deadline: deadline(row.timeoutAt),
       cancel: copy.cancel,
       dropped: badge('dropped', dropped[row.sessionId] ?? 0),
       pending: badge('pending', row.pendingWakeups),

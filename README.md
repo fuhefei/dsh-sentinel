@@ -8,7 +8,7 @@ Condition-driven wakeup for [DeepSeek Harness](https://github.com/deepseek-ai/de
 
 ## How it works
 
-The node half owns one server-lifetime runtime that folds a plugin-owned sidecar log (`$DSH_HOME/sentinel.jsonl`) into live subscriptions, probes every probe sensor on a shared 5s heartbeat, observes every published session's durable `turn/end` event for `session` watches, and delivers wakeups through the official followup channel — resuming a dormant session's agent first when needed. Subscriptions therefore survive process restarts, and conditions that become true while the server is down late-fire on the next probe (session watches fire on the next observed turn end).
+The node half owns one server-lifetime runtime that folds a plugin-owned sidecar log (`$DSH_HOME/sentinel.jsonl`) into live subscriptions, probes every probe sensor on a shared 5s heartbeat, observes every published session's durable `turn/end` event for `session` watches, and delivers wakeups through the official followup channel — resuming a dormant session's agent first when needed. Subscriptions therefore survive process restarts, and conditions that become true while the server is down late-fire on the next probe (session watches fire on the next observed turn end). A watch can also carry a planned deadline (`timeout_seconds`): if it never fires before that deadline, the sentinel wakes the agent with a timeout notice and retires the watch — see [Planned timeouts](#planned-timeouts).
 
 Watching is a resident-process concern: probing and fire delivery only run while a long-running dsh process (typically `dsh web`) is up. Headless one-shot runs load the plugin and can create, list and cancel watches, but nothing probes after the process exits — those watches become active once a resident process starts.
 
@@ -35,6 +35,23 @@ Two surfaces make the server-global watch set visible. A **Sentinel entry in the
 With `pattern`, probe kinds fire on the no-match→match edge of that regex, webhooks accept only matching payloads, and session watches fire only when the ended turn's reason kind matches the regex (`completed`, `max-tokens`, `aborted`, `blocked`, `error`, `interrupted`, `forked`); without it, probe kinds fire on any change after the baseline, webhooks fire on any POST, and session watches fire on any turn end.
 
 Session watches make serial session chains possible without poking anything from a prompt: `{ "kind": "session", "target": "<other-session-id>", "note": "step 1 finished — you're up", "maxFires": 1 }` wakes the watching session when the target session finishes a turn, and `pattern: "^completed$"` requires a clean completion (a crashed or aborted session never satisfies it, so the chain stops). The event is the host's durable `turn/end`; no probe baseline or heartbeat is involved. A turn end that happens while no resident dsh process can observe events is not replayed later — use a probe-backed gate when a chain must survive total downtime.
+
+## Planned timeouts
+
+`timeout_seconds` adds a planned deadline to any watch. If no condition fire arrives before it, the sentinel delivers one **TIMEOUT wakeup** — the original note, the planned deadline, and the last probe state/snapshot — so the agent can check whether the watched task is stuck or the watch itself was misconfigured (wrong target, pattern that can never match, missing process), then retire it. That is the difference from `expires_in_seconds`, which stays a silent lifetime cap: expiry just cancels the watch, while a timeout wakes the agent.
+
+```json
+{ "kind": "command", "target": "npm run build", "note": "构建结束后继续部署", "maxFires": 1, "timeout_seconds": 600 }
+```
+
+A timeout is exactly what a stuck or misconfigured watch needs: a "5-minute" task can no longer drag on for 30 minutes unnoticed.
+
+- The deadline is scanned on the shared heartbeat, so it survives restarts and late-fires on boot if it passed while no resident process was up (like a probe transition). Granularity is one heartbeat.
+- It is terminal and at most once: the fired timeout retires the watch, even when the budget still has fires left.
+- A watch that already fired is retired silently at its deadline — the deadline guards the never-fired case; register a second watch if you want a scheduled review ping.
+- Session and webhook watches are included: no probing is involved, and their last state (`awaiting turn end` / `awaiting push`) is reported with the timeout.
+- Keep `timeout_seconds` longer than `interval_seconds` so at least one probe can observe the target; the two arguments are rejected together when `timeout_seconds >= expires_in_seconds`.
+- The deadline also appears as a countdown in the dock row and in the dashboard's **Deadline** column.
 
 ## Configuration
 
@@ -85,7 +102,7 @@ Styles live in [the standalone stylesheet source](src/dashboard.css), copied by 
 
 ## Tools
 
-- `sentinel_watch` — register a watch: `kind` (`file`, `command`, `http`, `process`, `port`, `session` or `webhook`), `target`, optional `pattern`, `interval` (5–86400s, default 30; ignored for `session` and `webhook`), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `ttl`. For `session`, `target` is the id of the session whose `turn/end` to observe.
+- `sentinel_watch` — register a watch: `kind` (`file`, `command`, `http`, `process`, `port`, `session` or `webhook`), `target`, optional `pattern`, `interval` (5–86400s, default 30; ignored for `session` and `webhook`), `note` (delivered verbatim with every wakeup), `maxFires` (default 1: one-shot), `cooldown` (default 60s), optional `expires_in_seconds` (silent lifetime cap), optional `timeout_seconds` (planned deadline that fires a TIMEOUT wakeup if nothing fired by then). For `session`, `target` is the id of the session whose `turn/end` to observe.
 - `sentinel_list` — active watches with live probe state.
 - `sentinel_cancel` — cancel one watch by id.
 
@@ -109,7 +126,7 @@ First-probe semantics: a pattern-less probe watch absorbs its first observation 
 
 Validated on 2026-11-11: typecheck, build and all 210 tests pass. The installed release also passes webhook registration, HTTP push and wakeup delivery on the live host's Cordis `4.0.5`; the DSH `0.2.1-rc.4` web deployment loads Sentinel `0.14.2` and passes `check-sentinel-deploy.sh`.
 
-Verified against these harness versions (plugin loads, duty lease is held, web routes answer). Session watches require the host's root-scope `session/event` feed, which the supported 0.2.x line provides; on a host outside that range the watch would be accepted but never fire. Sidecar rollback note: a `sentinel.jsonl` containing session-watch rows (new `kind`, or `trigger.kind: "session"` on fired rows) is rejected by 0.13.2 and older readers — cancel those watches before downgrading.
+Verified against these harness versions (plugin loads, duty lease is held, web routes answer). Session watches require the host's root-scope `session/event` feed, which the supported 0.2.x line provides; on a host outside that range the watch would be accepted but never fire. Sidecar rollback note: a `sentinel.jsonl` containing session-watch rows (new `kind`, or `trigger.kind: "session"` on fired rows) is rejected by 0.13.2 and older readers — cancel those watches before downgrading. The same applies to timeout wakeups: a fired row with `trigger.kind: "timeout"` (written by 0.15.0 and later when a `timeout_seconds` watch times out) is rejected by 0.14.x and older readers — cancel timeout-armed watches before downgrading.
 
 - `0.2.2-rc.1` — 2026-11-10, `v0.14.1` refresh against the latest DSH 0.2 line. Build dependencies move to `0.2.2-rc.1`, `schemastery` to `3.19.x`, and the session-projection type surface is declared explicitly. DSH `0.2.2` returns projection state as `unknown`; preset restoration now narrows the nullable saved id before mounting. `pnpm typecheck`, `pnpm build`, and all 208 tests pass; the live profile loads `dsh-sentinel 0.14.1` and `check-sentinel-deploy.sh` returns `RESULT: PASS`.
 - `0.2.1-rc.4` — 2026-11-02, live web deployment upgraded from `0.2.1-rc.2` together with the `v0.14.0` plugin (launcher backup + clean profile reinstall + automatic verify/rollback kept; rehearsed first on an isolated copy of the live profile): launcher `0.2.1-rc.4`, sentinel **0.14.0**, web-shell `0.2.0`; boot graph 72 rows, both client bundles served, duty lease and state route answer, zero skipped bundles / activation warnings, no host `@deepseek-ai` packages in the profile. `locale: zh` is configured in the profile patch for server messages. The deployment's own `check-sentinel-deploy.sh` returned `RESULT: PASS`.
