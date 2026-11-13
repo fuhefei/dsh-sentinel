@@ -43,7 +43,8 @@ function watch(overrides: Partial<WatchRow> = {}): WatchRow {
   return {
     sessionId: 'session-review', live: true, id: 'watch-1', kind: 'file', target: '"><img src=x>',
     intervalSeconds: 30, note: '用户 note $& {{id}}', fireCount: 1, maxFires: 2,
-    createdAt: '2026-01-01T00:00:00Z', pendingWakeups: 2, lastState: 'absent',
+    createdAt: '2026-01-01T00:00:00Z', timeoutAt: '2026-01-01T00:01:00.000Z',
+    pendingWakeups: 2, lastState: 'absent',
     ...overrides,
   }
 }

@@ -18,6 +18,7 @@ describe('dashboardHtml', () => {
     const html = dashboardHtml([])
     expect(html).toContain('<html lang="en">')
     expect(html).toContain('<title>Sentinel overview</title>')
+    expect(html).toContain('<th>Next probe</th><th>Deadline</th>')
     expect(html).toContain('<th>Time</th><th>Watch</th><th>Session</th><th>Summary</th>')
     expect(html).toContain('No active watches right now.')
     expect(html).not.toMatch(/\p{Script=Han}/u)
@@ -27,9 +28,23 @@ describe('dashboardHtml', () => {
     const html = dashboardHtml([], [], {}, 'zh')
     expect(html).toContain('<html lang="zh-CN">')
     expect(html).toContain('<title>Sentinel 全局总览</title>')
+    expect(html).toContain('<th>下次探测</th><th>截止</th>')
     expect(html).toContain('<th>时间</th><th>监控</th><th>会话</th><th>摘要</th>')
     expect(html).toContain('当前没有活跃的监控。')
     expect(html).toContain('<tbody id="rows">')
+  })
+
+  it('renders a timeout fire summary and the planned deadline in both languages', () => {
+    const deadline = '2026-01-01T00:10:00.000Z'
+    const fire = {
+      sessionId: row().sessionId, id: 'watch-1', at: '2026-01-01T00:10:01.000Z',
+      summary: '', trigger: { kind: 'timeout' as const, deadline }, state: 'absent',
+    }
+    const en = dashboardHtml([row({ timeoutAt: deadline })], [fire], {}, 'en')
+    expect(en).toContain('No condition fire before the planned deadline (state: absent)')
+    expect(en).toContain('watch-1')
+    const zh = dashboardHtml([row({ timeoutAt: deadline })], [fire], {}, 'zh')
+    expect(zh).toContain('计划截止时间前未触发（状态: 不存在）')
   })
 
   it.each([
