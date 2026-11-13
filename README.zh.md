@@ -122,12 +122,15 @@ templates/layouts/document.html  文档元信息与资源链接
 
 ## 兼容性
 
+`v0.15.0` 新增计划超时唤醒（[#18](https://github.com/fuhefei/dsh-sentinel/issues/18)），并恢复与 DSH `0.2.2-rc.2` 的兼容（[#20](https://github.com/fuhefei/dsh-sentinel/issues/20)）。watch 现在可以带 `timeout_seconds`：到点仍从未触发时，哨兵会投递一次带最后观测结果的超时唤醒并注销该 watch；`expires_in_seconds` 仍是静默取消的生命周期上限。根级 agent 判定不再假设 `ctx.agents.roots()` 存在：DSH `0.2.2-rc.2` 删掉了该注册表方法，插件改为回退到"会话 header origin 不是 `subagent` 的确切存活注册项"（上游迁移指南给出的替代写法），在仍提供 `roots()` 的宿主上继续沿用旧路径，并保证未来宿主 API 漂移只会留下一次性告警而不会中断会话创建。
+
 `v0.14.2` 修复 [#17](https://github.com/fuhefei/dsh-sentinel/issues/17)：注册 webhook 时通过 Cordis 服务查询读取可选的 `webServer`，返回 hook URL 时不再抛出注入异常。Web profile 继续使用实际监听端口，headless profile 返回相对 hook 路径。新增回归测试使用真实 Cordis 插件上下文覆盖两种模式。
 
-2026-11-11 验证：类型检查、构建和全部 210 个测试通过。已安装的发布包使用线上宿主的 Cordis `4.0.5`，通过 webhook 注册、HTTP 推送和唤醒投递验证；DSH `0.2.1-rc.4` 的 web 部署已加载 Sentinel `0.14.2`，`check-sentinel-deploy.sh` 通过。
+2026-11-13 验证：类型检查、构建和全部 236 个测试通过，包含模拟 `0.2.2-rc.2` 注册表的回归、旧 `agents.roots()` 路径，以及 11 个端到端超时唤醒场景。线上 DSH `0.2.1-rc.4` web 部署继续运行 Sentinel `0.14.2`；`v0.15.0` 在该宿主线是增量兼容的，发布前其打包产物已在隔离的 `0.2.1-rc.4` web 实例上彩排过。
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。超时唤醒同理：`timeout_seconds` watch 超时后写入的 fired 行带 `trigger.kind: "timeout"`（0.15.0 起），会被 0.14.x 及更旧的 reader 拒绝——降级前先取消带超时的 watch。
 
+- `0.2.2-rc.2` —— 2026-11-13，`v0.15.0`：DSH `0.2.2-rc.2` 删除了 `AgentRegistry.roots()`，根级判定改为特性探测，缺失时按上游 `session.header.origin !== "subagent"` 过滤存活 agent，新建会话不再因 `TypeError: ctx.agents.roots is not a function` 失败。回归测试覆盖两种注册表形态，以及一个"无法判定时必须告警、不得抛出"的形态。本版本同时新增计划超时唤醒（`timeout_seconds`）；全部 236 个测试通过。
 - `0.2.2-rc.1` —— 2026-11-10，`v0.14.1` 对齐最新 DSH 0.2 线。构建依赖升级到 `0.2.2-rc.1`，`schemastery` 升到 `3.19.x`，显式声明 session projection 类型入口。DSH `0.2.2` 将投影状态返回值改为 `unknown`，恢复保存的 preset 时增加可空字符串边界收窄。`pnpm typecheck`、`pnpm build` 和全部 208 个测试通过；线上 profile 已加载 `dsh-sentinel 0.14.1`，`check-sentinel-deploy.sh` 返回 `RESULT: PASS`。
 - `0.2.1-rc.4` —— 2026-11-02，线上 web 部署由 `0.2.1-rc.2` 升级、并同时部署 `v0.14.0` 插件（launcher 备份 + profile 净装 + 自动核验/回滚保留；升级前先在线上 profile 副本上彩排）：launcher `0.2.1-rc.4`、sentinel **0.14.0**、web-shell `0.2.0`；boot 图 72 条、两个客户端 bundle 正常下发、duty 租约与 state 路由应答、零跳过 bundle / 零 activation warning、profile 无宿主 `@deepseek-ai` 依赖。profile patch 已配置 `locale: zh`（服务端中文消息）。部署自带的 `check-sentinel-deploy.sh` 返回 `RESULT: PASS`。
 - `0.2.1-rc.2` —— 2026-10-19，线上 web 部署由 `0.2.0-rc.2` 升级后实测（profile 净装、launcher 备份与回滚路径保留）：插件激活、持有 duty 租约、下发客户端半侧并应答 state 路由（boot 图 71 条、零跳过 bundle、终端插件仍在）。源码无需改动——对真实 `0.2.1-rc.2` 包运行 `tsc -b --noEmit` 通过、全部 76 个测试通过、重建的 `lib/` 逐字节不变——因此 0.13.2 是对齐版本：devDependencies 钉到 `0.2.1-rc.2`、声明 `engines.dsh` 为 `>=0.2.0-0 <0.3.0`，并补上 0.2 世代的展示元数据（`locale/*.json` + 图标），供插件管理器在不激活插件时读取。自 `0.2.1-alpha.4` 起，安装期版本闸门在声明了 `engines.dsh` 时**只**按它判断（已核对的宿主 `evaluatePluginCompatibility` 源码），因此 0.2 线的准入由这个字段承担；peer 范围仍作为老宿主的回退判断。
@@ -154,7 +157,7 @@ dsh plugin --profile web add dsh-sentinel
 或者直接从 git 装（构建产物直接提交在仓库里，git 源安装不需要跑构建）：
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.14.2"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.15.0"
 ```
 
 示例里的 tag 会随最新 release 更新；更旧的 tag 钉的是更旧的宿主线，抄进别的 dsh 版本前请先看 [Releases](https://github.com/fuhefei/dsh-sentinel/releases)（或干脆去掉 tag 跟 `main`）。
