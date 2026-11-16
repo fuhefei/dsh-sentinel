@@ -167,3 +167,102 @@ describe('createPoller', () => {
     poller.stop()
   })
 })
+
+describe('createPoller visibility gate', () => {
+  beforeEach(() => { vi.useFakeTimers() })
+  afterEach(() => { vi.useRealTimers() })
+
+  function gate(initiallyHidden = false) {
+    let hidden = initiallyHidden
+    const listeners = new Set<() => void>()
+    return {
+      hidden: () => hidden,
+      subscribe: (listener: () => void) => { listeners.add(listener); return () => { listeners.delete(listener) } },
+      set(value: boolean) { hidden = value; for (const l of [...listeners]) l() },
+      get listeners() { return listeners.size },
+    }
+  }
+
+  it('makes no request while hidden and refreshes immediately when visible again', async () => {
+    const g = gate(true)
+    const run = vi.fn(async () => {})
+    const poller = createPoller({ intervalMs: 1000, run, visibility: g })
+    poller.start()
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(run).not.toHaveBeenCalled()
+    g.set(false)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(run).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(run).toHaveBeenCalledTimes(4)
+    poller.stop()
+  })
+
+  it('stops scheduling when the page is hidden mid-loop and resumes on show', async () => {
+    const g = gate(false)
+    const run = vi.fn(async () => {})
+    const poller = createPoller({ intervalMs: 1000, run, visibility: g })
+    poller.start()
+    await vi.advanceTimersByTimeAsync(2500)
+    const before = run.mock.calls.length
+    g.set(true)
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(run.mock.calls.length).toBe(before)
+    g.set(false)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(run.mock.calls.length).toBe(before + 1)
+    poller.stop()
+  })
+
+  it('lets a request that was in flight when the page was hidden finish, then arms no timer', async () => {
+    const g = gate(false)
+    const server = hangable()
+    const poller = createPoller({ intervalMs: 1000, timeoutMs: 60_000, run: server.run, visibility: g })
+    poller.start()
+    g.set(true)
+    server.release()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(0)
+    g.set(false)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(server.maxInFlight).toBe(1)
+    expect(poller.inFlight).toBe(1)
+    server.release()
+    poller.stop()
+  })
+
+  it('does not double-start when shown while a request is still in flight', async () => {
+    const g = gate(false)
+    const server = hangable()
+    const poller = createPoller({ intervalMs: 1000, timeoutMs: 60_000, run: server.run, visibility: g })
+    poller.start()
+    g.set(true)
+    g.set(false)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(server.maxInFlight).toBe(1)
+    // The in-flight request settles with the page visible: exactly one loop continues.
+    server.release()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(server.calls).toBe(2)
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(2)
+    poller.stop()
+  })
+
+  it('unsubscribes from the gate on stop', () => {
+    const g = gate(false)
+    const poller = createPoller({ intervalMs: 1000, run: async () => {}, visibility: g })
+    poller.start()
+    expect(g.listeners).toBe(1)
+    poller.stop()
+    expect(g.listeners).toBe(0)
+  })
+
+  it('polls regardless when visibility is null', async () => {
+    const run = vi.fn(async () => {})
+    const poller = createPoller({ intervalMs: 1000, run, visibility: null })
+    poller.start()
+    await vi.advanceTimersByTimeAsync(2500)
+    expect(run.mock.calls.length).toBeGreaterThanOrEqual(3)
+    poller.stop()
+  })
+})
