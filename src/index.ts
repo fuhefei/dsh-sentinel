@@ -74,8 +74,23 @@ export { localizeState } from './dashboard.ts'
 // (the interface exists in both), so the wakeup path needs no version split.
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
-    /** A sentinel watch fire delivered as a user-role wakeup. */
-    sentinel: { kind: 'sentinel' }
+    /**
+     * A sentinel wakeup delivered as a user-role message. One message can carry
+     * several pending fires — different watches, or one watch firing again — so
+     * the batch's watch ids ride along in the source instead of leaving
+     * listeners to parse `watch-N` out of the rendered title.
+     */
+    sentinel: {
+      kind: 'sentinel'
+      /**
+       * Ids of every watch whose fire is included in this delivered batch,
+       * deduped in queue (first-occurrence) order. Optional because wakeups
+       * persisted by older sentinel versions predate the field; the current
+       * runtime always sets a non-empty array, and consumers must fall back to
+       * the rendered title for old rows.
+       */
+      watchIds?: readonly string[]
+    }
   }
 }
 
@@ -338,6 +353,16 @@ interface FireRecord extends FireMessage {
   readonly after: string
 }
 
+/**
+ * One queued wakeup: the rendered user-message body plus the watch that fired
+ * it. The id is carried structurally, never re-derived from the rendered text,
+ * because deliver() batches several pending fires into one message.
+ */
+interface PendingWakeup {
+  readonly watchId: string
+  readonly text: string
+}
+
 /** All sentinel state for one session; lives as long as the server, not the agent. */
 class SessionWatch {
   folded: FoldedSentinel = { active: new Map(), lastOrdinal: 0, undeliveredFires: [] }
@@ -348,7 +373,8 @@ class SessionWatch {
   readonly watchFailures = new Map<string, number>()
   readonly pushTimers = new Map<string, ReturnType<typeof setTimeout>>()
   readonly recentFires: FireRecord[] = []
-  readonly pendingWakeups: string[] = []
+  /** Queued wakeup bodies with their watch id; deliver() batches them into one message. */
+  readonly pendingWakeups: PendingWakeup[] = []
   /** Cumulative wakeups dropped by the pending-queue cap (visible, not silent). */
   droppedWakeups = 0
 
@@ -541,7 +567,10 @@ class SentinelRuntime {
     const pending = watch.folded.undeliveredFires
     if (pending.length === 0) return
     const capped = pending.slice(-this.config.maxPendingWakeups)
-    watch.pendingWakeups.push(...capped.map(entry => renderWakeup(entry.sub, entry.fact, this.config.locale ?? 'en')))
+    watch.pendingWakeups.push(...capped.map(entry => ({
+      watchId: entry.sub.id,
+      text: renderWakeup(entry.sub, entry.fact, this.config.locale ?? 'en'),
+    })))
     const dropped = pending.length - capped.length
     if (dropped > 0) {
       watch.droppedWakeups += dropped
@@ -1063,7 +1092,7 @@ class SentinelRuntime {
     // Only the duty owner queues in-memory wakeups; on a passive instance the
     // queue would never drain — the owner requeues this fire from the log.
     if (!this.duty) return
-    watch.pendingWakeups.push(renderWakeup(sub, fact, this.config.locale ?? 'en'))
+    watch.pendingWakeups.push({ watchId: sub.id, text: renderWakeup(sub, fact, this.config.locale ?? 'en') })
     if (watch.pendingWakeups.length > this.config.maxPendingWakeups) {
       const dropped = watch.pendingWakeups.length - this.config.maxPendingWakeups
       watch.pendingWakeups.splice(0, dropped)
@@ -1204,10 +1233,14 @@ class SentinelRuntime {
     }
     if (agent.status !== 'idle' || watch.pendingWakeups.length === 0) return
     const batch = watch.pendingWakeups.splice(0, watch.pendingWakeups.length)
+    // One message is the delivery unit, so its source names the whole batch:
+    // Set insertion order preserves first-occurrence (queue) order, and a watch
+    // that fired twice into the same batch appears once.
+    const watchIds: readonly string[] = [...new Set(batch.map(entry => entry.watchId))]
     try {
       agent.followup(createUserMessage({
-        content: [{ type: 'text', text: batch.join('\n\n---\n\n') }],
-        source: { kind: 'sentinel' },
+        content: [{ type: 'text', text: batch.map(entry => entry.text).join('\n\n---\n\n') }],
+        source: { kind: 'sentinel', watchIds },
       }))
     } catch (error: unknown) {
       this.warn(`wakeup delivery failed for session "${watch.sessionId}": ${describe(error)}`)
