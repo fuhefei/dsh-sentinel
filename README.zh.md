@@ -124,11 +124,13 @@ templates/layouts/document.html  文档元信息与资源链接
 
 ## 兼容性
 
+`v0.16.0` 在页面隐藏时暂停浏览器半侧的 state 轮询（社区 PR [#22](https://github.com/fuhefei/dsh-sentinel/pull/22)，作者 @deestax：`document.visibilityState === "hidden"` 期间不发请求、不留 timer，恢复可见时立即刷新一次，节奏不变；实测隐藏 10 秒/20 秒窗口内 0 请求），并给唤醒消息加上结构化的批次标识（[#21](https://github.com/fuhefei/dsh-sentinel/issues/21)）。一条唤醒是每个 idle 边沿的一条 user 角色消息，其 source 现在为 `{ kind: "sentinel", watchIds: [...] }`——本次批次内所有触发所属 watch 的 id，按入队顺序去重。监听方（例如自动化模型路由）不必再从渲染标题里解析 `watch-N`；`watchIds` 在类型上是可选的，因为更早版本持久化的唤醒没有该字段，消费方对旧记录仍应回退到标题解析。sidecar 与会话格式均无 schema 变化。
+
 `v0.15.0` 新增计划超时唤醒（[#18](https://github.com/fuhefei/dsh-sentinel/issues/18)），并恢复与 DSH `0.2.2-rc.2` 的兼容（[#20](https://github.com/fuhefei/dsh-sentinel/issues/20)）。watch 现在可以带 `timeout_seconds`：到点仍从未触发时，哨兵会投递一次带最后观测结果的超时唤醒并注销该 watch；`expires_in_seconds` 仍是静默取消的生命周期上限。根级 agent 判定不再假设 `ctx.agents.roots()` 存在：DSH `0.2.2-rc.2` 删掉了该注册表方法，插件改为回退到"会话 header origin 不是 `subagent` 的确切存活注册项"（上游迁移指南给出的替代写法），在仍提供 `roots()` 的宿主上继续沿用旧路径，并保证未来宿主 API 漂移只会留下一次性告警而不会中断会话创建。
 
 `v0.14.2` 修复 [#17](https://github.com/fuhefei/dsh-sentinel/issues/17)：注册 webhook 时通过 Cordis 服务查询读取可选的 `webServer`，返回 hook URL 时不再抛出注入异常。Web profile 继续使用实际监听端口，headless profile 返回相对 hook 路径。新增回归测试使用真实 Cordis 插件上下文覆盖两种模式。
 
-2026-11-13 验证：类型检查、构建和全部 236 个测试通过，包含模拟 `0.2.2-rc.2` 注册表的回归、旧 `agents.roots()` 路径，以及 11 个端到端超时唤醒场景。线上 DSH `0.2.1-rc.4` web 部署继续运行 Sentinel `0.14.2`；`v0.15.0` 在该宿主线是增量兼容的，发布前其打包产物已在隔离的 `0.2.1-rc.4` web 实例上彩排过。
+2026-11-16 验证：类型检查、构建和全部 243 个测试通过。唤醒 source 契约已在真实 DSH `0.2.1-rc.4` 实例上验证——新构建在持久化 user 消息行里写入 `{"kind":"sentinel","watchIds":["watch-N"]}`（上一版写入的是不含该字段的 `{"kind":"sentinel"}`），两次 watch 三次触发的批次按队列顺序去重持久化，冷重启重放日志无格式错误。页面隐藏暂停用真实浏览器 + 真实切 tab 实测：隐藏期间 `/state` 0 请求（上一版 10 秒 2 次、20 秒 5 次），恢复可见立即刷新一次，3 秒节奏不变。线上 DSH `0.2.1-rc.4` web 部署继续运行 Sentinel `0.15.0`；`v0.16.0` 在该宿主线是增量兼容的。
 
 在以下宿主版本上实测通过（插件加载、duty 租约持有、web 路由应答均正常）。session 传感器要求宿主提供根级 `session/event` 事件流，受支持的 0.2.x 线均具备；在支持范围之外的宿主上，watch 会被接受但永远不会触发。sidecar 回滚提示：含 session watch 行（新 `kind`，或 fired 行上的 `trigger.kind: "session"`）的 `sentinel.jsonl` 会被 0.13.2 及更旧的 reader 拒绝——降级前先取消这些 watch。超时唤醒同理：`timeout_seconds` watch 超时后写入的 fired 行带 `trigger.kind: "timeout"`（0.15.0 起），会被 0.14.x 及更旧的 reader 拒绝——降级前先取消带超时的 watch。
 
@@ -159,7 +161,7 @@ dsh plugin --profile web add dsh-sentinel
 或者直接从 git 装（构建产物直接提交在仓库里，git 源安装不需要跑构建）：
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.15.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.16.0"
 ```
 
 示例里的 tag 会随最新 release 更新；更旧的 tag 钉的是更旧的宿主线，抄进别的 dsh 版本前请先看 [Releases](https://github.com/fuhefei/dsh-sentinel/releases)（或干脆去掉 tag 跟 `main`）。

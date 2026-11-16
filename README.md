@@ -124,11 +124,13 @@ First-probe semantics: a pattern-less probe watch absorbs its first observation 
 
 ## Compatibility
 
+`v0.16.0` pauses the browser half's state polling while the page is hidden (community PR [#22](https://github.com/fuhefei/dsh-sentinel/pull/22) by @deestax: no request and no timer armed while `document.visibilityState === "hidden"`, one immediate refresh on return, cadence unchanged; measured zero requests over hidden 10 s/20 s windows) and gives wake-ups a structural batch identity ([#21](https://github.com/fuhefei/dsh-sentinel/issues/21)). A wake-up is one user-role message per idle edge, so its source is now `{ kind: "sentinel", watchIds: [...] }` — the deduped, queue-ordered ids of every watch whose fire is included in that batch. Listeners (for example automation-model routers) no longer need to parse `watch-N` out of the rendered title; `watchIds` is optional in the type because wake-ups persisted by older versions omit it, so consumers should keep the title fallback for those rows. No sidecar or session-format schema change.
+
 `v0.15.0` adds planned-deadline timeout wakeups ([#18](https://github.com/fuhefei/dsh-sentinel/issues/18)) and restores compatibility with DSH `0.2.2-rc.2` ([#20](https://github.com/fuhefei/dsh-sentinel/issues/20)). A watch may now carry `timeout_seconds`: if it never fires before that deadline, the sentinel delivers one TIMEOUT wakeup with the last observation and retires the watch, while `expires_in_seconds` keeps its silent-cancel semantics. Root-agent classification no longer assumes `ctx.agents.roots()`: DSH `0.2.2-rc.2` removed that registry method, so the plugin falls back to the exact live registry entry whose session header origin is not `subagent` (the replacement pattern the upstream migration guide prescribes), keeps using `roots()` on hosts that still expose it, and never lets host-API drift abort session creation.
 
 `v0.14.2` fixes [#17](https://github.com/fuhefei/dsh-sentinel/issues/17): webhook registration now reads the optional `webServer` through Cordis service lookup, so returning the hook URL no longer throws an injection error. Web profiles retain the actual listening port; headless profiles return a relative hook path. Regression tests exercise both modes with real Cordis plugin contexts.
 
-Validated on 2026-11-13: typecheck, build and all 236 tests pass, including the simulated `0.2.2-rc.2` registry regression, the legacy `agents.roots()` path, and 11 end-to-end timeout-wakeup scenarios. The live DSH `0.2.1-rc.4` web deployment keeps running Sentinel `0.14.2`; `v0.15.0` is additive on that host line, and its packaged build was rehearsed on an isolated `0.2.1-rc.4` web instance before release.
+Validated on 2026-11-16: typecheck, build and all 243 tests pass. The wake-up source contract was verified on a real DSH `0.2.1-rc.4` instance — the new build persists `{"kind":"sentinel","watchIds":["watch-N"]}` in the durable user-message row (the previous release persists `{"kind":"sentinel"}` without it), a three-fire/two-watch batch persists deduped queue order, and a cold reboot replays the log cleanly. The visibility pause was measured in a real browser with real tab switches: zero `/state` requests while hidden (released build: 2 per 10 s and 5 per 20 s), one immediate refresh on show, unchanged 3 s cadence. The live DSH `0.2.1-rc.4` web deployment keeps running Sentinel `0.15.0`; `v0.16.0` is additive on that host line.
 
 Verified against these harness versions (plugin loads, duty lease is held, web routes answer). Session watches require the host's root-scope `session/event` feed, which the supported 0.2.x line provides; on a host outside that range the watch would be accepted but never fire. Sidecar rollback note: a `sentinel.jsonl` containing session-watch rows (new `kind`, or `trigger.kind: "session"` on fired rows) is rejected by 0.13.2 and older readers — cancel those watches before downgrading. The same applies to timeout wakeups: a fired row with `trigger.kind: "timeout"` (written by 0.15.0 and later when a `timeout_seconds` watch times out) is rejected by 0.14.x and older readers — cancel timeout-armed watches before downgrading.
 
@@ -159,7 +161,7 @@ dsh plugin --profile web add dsh-sentinel
 Or straight from git (build artifacts are committed, so the git-source install runs no build):
 
 ```sh
-dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.15.0"
+dsh plugin --profile web add "github:fuhefei/dsh-sentinel#v0.16.0"
 ```
 
 The tag in this example tracks the latest release; older tags pin older host lines, so check the [Releases](https://github.com/fuhefei/dsh-sentinel/releases) page (or drop the tag and follow `main`) before copying into a different dsh version.
