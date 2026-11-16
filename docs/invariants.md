@@ -84,3 +84,13 @@ either broken once or is one edit away from breaking.
     - the fire keeps the ordinary durable delivery path (`delivered`
       watermark, boot requeue, external notify webhook) and the ordinary
       message-source attribution.
+11. **A wakeup's source names every watch in its batch.** Delivery is one
+    user-role message per idle edge, so several fires — different watches, or
+    one watch firing again — can share a message. That message's `source` is
+    `{ kind: 'sentinel', watchIds }`: the ids of every watch whose fire is
+    included, deduped in queue (first-occurrence) order, never empty for
+    messages sent by the current runtime. There is no singular `watchId`
+    field: the batch is the delivery unit. `watchIds` is declared optional
+    because wakeups persisted by older versions omit it; consumers must fall
+    back to the rendered title for those rows, never re-derive batch
+    membership by parsing it.

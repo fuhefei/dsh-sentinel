@@ -14,6 +14,8 @@ Node 侧持有一个与 server 同生命周期的运行时：把插件自己的 
 
 每个 `$DSH_HOME` 只有一个值守 owner：租约文件 `sentinel.lease` 让第一个进程拥有探测和投递权；同一 home 上的第二个 dsh 进程保持被动（工具可用，写入照常落到共享 sidecar），owner 死后一个租约 TTL 内接管。owner 每个心跳重读 sidecar，被动实例上创建的 watch 会被自动收编。投递语义是 at-least-once：崩溃前已记录但没送出的触发，重启后从 `delivered` 水位线重新入队。
 
+每条唤醒都是一条 user 角色消息，其 `source` 为 `{ kind: 'sentinel', watchIds }`：`watchIds` 按入队顺序、去重后列出本次投递批次所含每一条触发所属 watch 的 id。批次才是投递单位（agent 忙时触发会排队，崩溃重入队还可能追加），所以监听方应直接读 source，而不是从渲染标题里解析 `watch-N`。`watchIds` 是本版本新增的字段：更早版本持久化的唤醒消息没有它，消费方对旧记录必须回退到渲染标题解析。契约其余部分不变——仍然是 user 角色消息，`source.kind === 'sentinel'`。
+
 浏览器侧是 composer 上方的 dock 卡片（`conversation.input.dock` 族），列出本会话的活跃 watch——传感器、目标、实时探测状态、触发预算、下次探测倒计时——展开还有最近的触发历史。它轮询只读的 state 路由；会话没有 watch 时不渲染任何东西。
 
 两个界面暴露 server 全局的 watch 集合。**侧边栏全局面板列表**里多出一个哨兵条目（`sidebar.panellist`，id `sentinel`），点击即在中栏（`main` 同名 key）打开 watch 表——只要有活跃 watch，图标上就带一个状态点。dashboard 是跨所有会话的全量 watch 表：会话（active/dormant）、传感器、目标、pattern、触发预算、最近探测状态、下次探测。

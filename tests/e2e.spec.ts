@@ -11,8 +11,8 @@ import { apply, CANCEL_PATH, DASHBOARD_PATH, DEFAULT_CONFIG, HOOK_PATH, inject, 
 
 function makeHarness(resumable: string[] = [], options: { headless?: boolean; savedPreset?: string; reasoningEffort?: string; legacyRoots?: boolean } = {}) {
   const followups: string[] = []
-  // The wakeup's message-source attribution: 0.1.7 dropped the shared
-  // `plugin` kind, so the contract we must hold is our own declared kind.
+  // The wakeup's message-source attribution: our own declared `sentinel` kind
+  // (DSH 0.1.7 dropped the shared `plugin` kind) plus the batch's `watchIds`.
   const sources: unknown[] = []
   const listeners = new Map<string, Array<(...args: unknown[]) => void>>()
   const tools: Array<{
@@ -452,8 +452,9 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(wakeup).toContain('触发后继续部署流程')
     expect(wakeup).toContain('This was the final fire')
     // Attribution contract: the wakeup declares the plugin's own source kind,
-    // never the catch-all `plugin` kind that DSH 0.1.7 removed.
-    expect(harness.sources[0]).toEqual({ kind: 'sentinel' })
+    // never the catch-all `plugin` kind that DSH 0.1.7 removed, and carries the
+    // fired watch id structurally so listeners never parse the title.
+    expect(harness.sources[0]).toEqual({ kind: 'sentinel', watchIds: ['watch-1'] })
   }, 30_000)
 
   it('folds durable subscriptions back to life across a server restart', async () => {
@@ -1162,6 +1163,8 @@ describe('sentinel end-to-end (in-process)', () => {
     await sleep(7000)
     expect(second.followups.length).toBe(1)
     expect(second.followups[0]).toContain('[dsh-sentinel] Watch watch-1 fired')
+    // The requeued wakeup restores its batch id from the fired sidecar rows.
+    expect(second.sources[0]).toEqual({ kind: 'sentinel', watchIds: ['watch-1'] })
 
     // Delivery wrote its watermark: no third delivery of the same fire.
     const lines = await storeLines()
@@ -1285,6 +1288,53 @@ describe('sentinel end-to-end (in-process)', () => {
     return found
   }
 
+  it('batches queued fires into one wakeup whose source names every watch id, deduped in queue order', async () => {
+    await freshHome()
+    const harness = makeHarness()
+    harnesses.push(harness)
+    apply(harness.rootCtx as never, { ...DEFAULT_CONFIG, heartbeatMs: 100 })
+    harness.emit('agent/created', { agent: harness.agent })
+    const watchTool = tool(harness, 'sentinel_watch')
+
+    // A busy agent turns fires into a queue instead of separate wakeups. Fire
+    // watch-2 first, then watch-1 twice: the batch must list queue order and
+    // name the repeated watch once.
+    harness.agent.status = 'busy'
+    await watchTool.execute({
+      kind: 'webhook', target: 'ci-a', note: 'first watch body', max_fires: 3, cooldown_seconds: 0,
+    }, {})
+    await watchTool.execute({
+      kind: 'webhook', target: 'ci-b', note: 'second watch body', max_fires: 1,
+    }, {})
+    expect(await pushHook(harness, 'payload-b', 'watch-2')).toBe(200)
+    expect(await pushHook(harness, 'payload-a1', 'watch-1')).toBe(200)
+    expect(await pushHook(harness, 'payload-a2', 'watch-1')).toBe(200)
+    expect(harness.followups.length).toBe(0)
+
+    // One idle edge flushes the whole queue as a single message.
+    harness.agent.status = 'idle'
+    await expect.poll(() => harness.followups.length, { timeout: 3000 }).toBe(1)
+    const body = harness.followups[0] ?? ''
+    expect(body).toContain('first watch body')
+    expect(body).toContain('second watch body')
+    // Three fires (watch-1 twice, watch-2 once) share the one message text.
+    expect(body.match(/first watch body/g)).toHaveLength(2)
+    expect(body.match(/second watch body/g)).toHaveLength(1)
+    // Deduped, queue order: watch-2 fired before watch-1, and watch-1's second
+    // fire does not repeat its id.
+    expect(harness.sources).toEqual([{ kind: 'sentinel', watchIds: ['watch-2', 'watch-1'] }])
+
+    // Delivery cleared the queue and watermarked the batch.
+    const stateRoute = harness.routes.find(route => route.path === STATE_PATH)
+    if (stateRoute === undefined) throw new Error('state route missing')
+    let stateBody = ''
+    await stateRoute.handler({ url: `${STATE_PATH}?sessionId=session-e2e` }, { writeHead() {}, end(value: string) { stateBody = value } })
+    const state = JSON.parse(stateBody) as { watches: Array<{ pendingWakeups?: number }> }
+    expect(state.watches).toHaveLength(1)
+    expect(state.watches[0]?.pendingWakeups).toBe(0)
+    await expect.poll(async () => (await storeLines()).some(line => line.change.change === 'delivered'), { timeout: 2000 }).toBe(true)
+  }, 15_000)
+
   it('wakes the agent with a timeout when a watch never fires before its deadline', async () => {
     await freshHome()
     const harness = makeHarness()
@@ -1311,7 +1361,8 @@ describe('sentinel end-to-end (in-process)', () => {
     expect(body).toContain('stuck build: check progress and the watch target')
     expect(body).toContain('sentinel TIMEOUT wakeup')
     expect(body).toContain('Last observation')
-    expect(harness.sources[0]).toEqual({ kind: 'sentinel' })
+    // A timeout is a fire like any other: the source still names the watch id.
+    expect(harness.sources[0]).toEqual({ kind: 'sentinel', watchIds: ['watch-1'] })
 
     // At most one terminal wakeup and the watch is retired from the active set.
     await sleep(700)
@@ -1463,6 +1514,7 @@ describe('sentinel end-to-end (in-process)', () => {
     await expect.poll(() => second.followups.length, { timeout: 6000 }).toBe(1)
     expect(second.followups[0]).toContain('timed out')
     expect(second.followups[0]).toContain('crash window: timeout fire must survive')
+    expect(second.sources[0]).toEqual({ kind: 'sentinel', watchIds: ['watch-1'] })
     await sleep(700)
     expect(second.followups.length).toBe(1)
   }, 20_000)
